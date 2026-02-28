@@ -21,6 +21,13 @@ DUST_ACCUMULATION_RATE = 0.4
 RAIN_CLEANING_THRESHOLD = 5.0
 RAIN_CLEANING_EFFICIENCY = 0.9
 MAX_DUST_CAPACITY = 15.0
+AVG_SUN_HOURS_PER_DAY = 5.5 
+
+# ✅ 新增：清洗期间的发电效率折损系数
+# 解释：清洗时，被清洗的区域通常因遮挡或安全停机而不发电。
+# 如果是分批清洗（例如5天洗完），那么每天约有 (1/5) 的容量损失。
+# 这里设定为 0.85，意味着清洗当天，全站整体发电能力约为平时的 85% (损失15%用于清洗作业)
+CLEANING_DERATING_FACTOR = 0.85 
 
 # ================= 核心数据库 =================
 STATION_DB = {
@@ -38,7 +45,6 @@ st.sidebar.header("📅 季度固定周期规划")
 
 selected_station = st.sidebar.selectbox("📍 选择目标电站", list(STATION_DB.keys()), index=0)
 
-# 初始化侧边栏参数监控
 if 'last_params' not in st.session_state:
     st.session_state.last_params = {}
 
@@ -59,7 +65,14 @@ if selected_station != "请选择电站...":
     robot_count = st.sidebar.number_input("🚜 可用机器人数量 (台)", value=5, min_value=1, step=1)
     daily_capacity = robot_count * ROBOT_EFFICIENCY_MW_PER_DAY
     days_to_clean_all = math.ceil(capacity_mw / daily_capacity) if daily_capacity > 0 else 999
-    st.sidebar.info(f"💡 **清洗能力**: {daily_capacity:.1f} MW/天\n**单次全站工期**: **{days_to_clean_all} 天**")
+    
+    # 动态计算清洗期间的折损率
+    # 如果需要 N 天洗完，那么每天大约有 1/N 的板子在清洗（不发电）
+    # 基础折损设为 0.9 (预留10%缓冲)，再减去清洗比例
+    cleaning_loss_ratio = 1.0 / days_to_clean_all if days_to_clean_all > 0 else 0.2
+    dynamic_derating = max(0.5, 1.0 - cleaning_loss_ratio) # 确保至少有50%能发电
+    
+    st.sidebar.info(f"💡 **清洗能力**: {daily_capacity:.1f} MW/天\n**单次全站工期**: **{days_to_clean_all} 天**\n**清洗日预计发电折损**: **{(1-dynamic_derating)*100:.1f}%**")
 
     st.sidebar.subheader("⚖️ 积灰模型参数")
     poll_idx = float(data['pollution_index'])
@@ -74,20 +87,16 @@ if selected_station != "请选择电站...":
     LATITUDE = float(data['lat'])
     LONGITUDE = float(data['lon'])
     
-    # 更新当前参数用于比对
     current_params['capacity'] = capacity_mw
     current_params['robots'] = robot_count
     current_params['dust_rate'] = effective_dust_rate
 else:
     st.stop()
 
-# ================= 核心逻辑：参数变更检测 =================
-# 检查侧边栏参数是否发生变化
 params_changed = False
 if st.session_state.last_params != current_params:
     params_changed = True
     st.session_state.last_params = current_params.copy()
-    # 如果参数变了，清除旧数据和过滤状态，强制重置
     if 'data_loaded' in st.session_state:
         del st.session_state['data_loaded']
         del st.session_state['df_daily']
@@ -95,16 +104,14 @@ if st.session_state.last_params != current_params:
     if 'filter_option' in st.session_state:
         del st.session_state['filter_option']
 
-# ================= 主界面 =================
 st.title(f"📅 {selected_station} - 季度固定清洗计划与智能优选")
 st.markdown(f"**容量**: {capacity_mw} MW | **机器人**: {robot_count} 台 | **单次工期**: {days_to_clean_all} 天")
 st.info(f"""
 **🏢 公司合规策略**:
 1. **固定频次**: 严格执行 **每季度清洗一次** (全年共4次)。
 2. **智能优选**: 在每个季度内，自动扫描并推荐 **连续{days_to_clean_all}天无暴雨 (<10mm)** 且 **积灰度最高** 的最佳时间段。
+3. **真实工况模拟**: 清洗期间，因组件遮挡和安全规范，**当日发电容量将折损约 {(1-dynamic_derating)*100:.0f}%**。
 """)
-
-# ================= 核心逻辑函数 =================
 
 @st.cache_data(ttl=3600)
 def get_real_historical_climate(lat, lon):
@@ -134,10 +141,11 @@ def get_real_historical_climate(lat, lon):
     except Exception as e:
         return None
 
-def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust_rate, r_eff, clean_duration):
+def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust_rate, r_eff, clean_duration, derating_factor):
     dates = weather_data['time']
     rain = weather_data['precipitation_sum']
     RAIN_THRESHOLD = 10.0
+    
     total_cleaning_cost = (capacity * WATER_CONSUMPTION_PER_MW) * p_water + (capacity * ENERGY_CONSUMPTION_PER_MW) * p_elec
     
     date_objs = [datetime.datetime.strptime(d, "%Y-%m-%d") for d in dates]
@@ -148,17 +156,18 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
     recommended_windows = []
     chosen_days = set()
     
-    # 预计算积灰
     dust_series = []
     current_dust = 0.0
     for i in range(len(dates)):
-        if rain[i] > RAIN_CLEANING_THRESHOLD: current_dust *= (1 - RAIN_CLEANING_EFFICIENCY)
-        elif rain[i] > 1.0: current_dust *= 0.8
-        if rain[i] <= RAIN_CLEANING_THRESHOLD: current_dust += dust_rate
+        if rain[i] > RAIN_CLEANING_THRESHOLD: 
+            current_dust *= (1 - RAIN_CLEANING_EFFICIENCY)
+        elif rain[i] > 1.0: 
+            current_dust *= 0.8
+        if rain[i] <= RAIN_CLEANING_THRESHOLD: 
+            current_dust += dust_rate
         current_dust = min(current_dust, MAX_DUST_CAPACITY)
         dust_series.append(current_dust)
 
-    # 寻找窗口
     for idx, (q_start, q_end) in enumerate(q_ranges):
         best_start = -1
         best_score = -1
@@ -184,7 +193,7 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
                     best_start = start
                     best_avg_dust = avg_dust
         
-        if best_start == -1: # 无完美窗口，选雨最小的
+        if best_start == -1: 
             min_rain_sum = 99999
             for start in range(q_start, q_end - clean_duration + 1):
                 r_sum = sum(rain[k] for k in range(start, start+clean_duration))
@@ -203,7 +212,6 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
             'avg_dust': avg_dust, 'cost': total_cleaning_cost, 'is_perfect': is_perfect
         })
 
-    # 生成每日表
     for i in range(len(dates)):
         date_obj = date_objs[i]
         weekday_cn = date_obj.strftime("%A")
@@ -212,18 +220,39 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
         is_rec = i in chosen_days
         q_info = next((w for w in recommended_windows if w['start_idx'] <= i <= w['end_idx']), None)
         
+        # 1. 计算理论满发收益
+        theoretical_revenue = capacity * AVG_SUN_HOURS_PER_DAY * 1000 * p_sell
+        
+        # 2. 计算积灰导致的效率损失
+        efficiency_loss_factor = min(dust_series[i] / 100.0, 1.0)
+        
+        # ✅ 核心修改：判断是否在清洗期
         if is_rec and q_info:
+            # --- 清洗日逻辑 ---
             status = f"📅 Q{q_info['q']} 推荐" if q_info['is_perfect'] else f"⚠️ Q{q_info['q']} 高风险"
             color = "green" if q_info['is_perfect'] else "red"
             action = "Scheduled Cleaning"
-            profit = -total_cleaning_cost if i == q_info['start_idx'] else 0
+            
+            # A. 发电收入折损：清洗期间，部分组件被遮挡或停机
+            # 公式：理论收益 * (1 - 积灰损失) * 清洗折损系数
+            # 注意：清洗后积灰度理论上在当天结束时归零，但当天大部分时间还是有积灰的，
+            # 为简化模型，我们假设当天发电时仍有积灰，但容量受限。
+            actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor) * derating_factor
+            
+            # B. 扣除清洗成本 (仅在第一天扣除，或分摊，此处保持首日扣除以体现现金流冲击)
+            daily_cost = total_cleaning_cost if i == q_info['start_idx'] else 0
+            
+            profit = actual_revenue - daily_cost
         else:
+            # --- 非清洗日逻辑 ---
             d_val = dust_series[i]
-            loss = (d_val * r_eff / 100.0) * (capacity * 1000.0 * 5.0) * p_sell
             status = "⚪ 积灰较少" if d_val < 3.0 else "⚠️ 积灰累积中"
             color = "gray" if d_val < 3.0 else "orange"
             action = "Monitor"
-            profit = -loss
+            
+            actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor)
+            daily_cost = 0
+            profit = actual_revenue
 
         daily_plans.append({
             "日期": dates[i], "星期": wk_map.get(weekday_cn, ""), "季度": (i // step) + 1,
@@ -234,8 +263,6 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
         
     return pd.DataFrame(daily_plans), recommended_windows, RAIN_THRESHOLD
 
-# ================= 执行与展示 =================
-
 if st.button("🔍 生成季度固定清洗计划", type="primary"):
     weather = get_real_historical_climate(LATITUDE, LONGITUDE)
     
@@ -243,26 +270,21 @@ if st.button("🔍 生成季度固定清洗计划", type="primary"):
         st.success(f"✅ **规划就绪**: 已划分4个季度并优选最佳窗口。")
         df_daily, rec_windows, RAIN_THRESHOLD = analyze_quarterly_plan(
             weather, capacity_mw, sell_price, robot_elec_price, water_price, 
-            effective_dust_rate, robot_eff, days_to_clean_all
+            effective_dust_rate, robot_eff, days_to_clean_all, dynamic_derating
         )
         
-        # 将数据存入 session_state
         st.session_state['df_daily'] = df_daily
         st.session_state['rec_windows'] = rec_windows
         st.session_state['data_loaded'] = True
-        # 注意：这里不设置 filter_option，让它保持用户之前的选择（如果有）
-        # 如果是因为侧边栏变化导致的数据清空，上面的检测逻辑已经删除了 filter_option
-        # 如果是首次加载，下面的逻辑会初始化它
 
-# 从 session_state 读取数据（如果存在）
 if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     df_daily = st.session_state['df_daily']
     rec_windows = st.session_state['rec_windows']
     
-    # --- 顶部统计 ---
     st.subheader("📊 年度季度清洗计划概览")
     cols = st.columns(4)
     total_cost = 0
+    
     for i, w in enumerate(rec_windows):
         total_cost += w['cost']
         if i < 4:
@@ -276,19 +298,17 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
                     st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
                     st.error(f"**高风险窗口**\n{detail}", icon="⚠️")
     
-    st.info(f"**💰 年度预估总清洗成本**: ${total_cost:,.1f}")
+    net_profit = df_daily['当日净现金流 ($)'].sum()
+    st.info(f"**💰 年度预估总清洗成本**: ${total_cost:,.1f} | **年度预估净收益**: ${net_profit:,.1f}")
     st.divider()
     
-    # --- 表格 (智能状态管理) ---
     st.subheader("📅 季度固定清洗执行计划表")
     
     filter_options = ["显示所有日期", "仅显示 📅 推荐清洗期", "仅显示 ⚠️ 高风险清洗期"]
     
-    # 初始化：只有当 filter_option 不存在时才设为默认值
     if 'filter_option' not in st.session_state:
         st.session_state.filter_option = filter_options[0]
     
-    # 使用 radio 组件，绑定 key
     selected_filter = st.radio(
         "🔍 视图过滤:", 
         filter_options, 
@@ -296,7 +316,6 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
         key='filter_option'
     )
     
-    # 根据选择过滤数据
     display_df = df_daily.copy()
     if selected_filter == "仅显示 📅 推荐清洗期":
         display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'green')]
@@ -310,9 +329,14 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
         if "累积" in val: return "color: orange; background-color: #ffedd5;"
         return ""
     
+    def cash_flow_color(val):
+        if val < 0: return "color: red; font-weight: bold;"
+        else: return "color: green; font-weight: bold;"
+
     st.dataframe(
         display_df.style.applymap(color_code, subset=['操作建议'])
-        .format({"当日净现金流 ($)": "${:.1f}", "动态积灰度 (%)": "{:.1f}%"}), 
+        .applymap(cash_flow_color, subset=['当日净现金流 ($)'])
+        .format({"当日净现金流 ($)": "${:,.1f}", "动态积灰度 (%)": "{:.1f}%"}), 
         use_container_width=True, 
         hide_index=True, 
         height=400
@@ -322,20 +346,25 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     st.download_button("📥 下载季度计划 CSV", data=csv, file_name='quarterly_plan.csv', mime='text/csv')
     st.divider()
     
-    # --- 可视化 ---
-    st.subheader("📈 全年积灰趋势与季度固定清洗窗口")
+    st.subheader("📈 全年积灰趋势、发电收益与季度固定清洗窗口")
     
     fig = go.Figure()
     
+    fig.add_trace(go.Bar(
+        x=df_daily['日期'], 
+        y=df_daily['当日净现金流 ($)'],
+        name='当日净现金流 ($)',
+        marker_color=df_daily['当日净现金流 ($)'].apply(lambda x: 'green' if x > 0 else 'red'),
+        opacity=0.6,
+        yaxis='y2' 
+    ))
+
     fig.add_trace(go.Scatter(
         x=df_daily['日期'], y=df_daily['动态积灰度 (%)'],
         mode='lines', name='动态积灰度 (%)',
-        line=dict(color='purple', width=2),
-        fill='tozeroy', fillcolor='rgba(128, 0, 128, 0.1)'
+        line=dict(color='purple', width=3),
+        yaxis='y1' 
     ))
-    
-    has_perfect = any(w['is_perfect'] for w in rec_windows)
-    has_risk = any(not w['is_perfect'] for w in rec_windows)
     
     for w in rec_windows:
         color = 'green' if w['is_perfect'] else 'red'
@@ -343,34 +372,45 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
             x0=w['start_date'], 
             x1=w['end_date'],
             fillcolor=color, 
-            opacity=0.25,
-            line_width=0
+            opacity=0.15,
+            line_width=0,
+            annotation_text=f"Q{w['q']} 清洗",
+            annotation_position="top right"
         )
     
     fig.update_layout(
-        height=500, margin=dict(l=0, r=0, t=30, b=0),
-        xaxis_title="日期", yaxis_title="积灰度 (%)",
+        height=600, 
+        margin=dict(l=0, r=0, t=30, b=0),
         hovermode='x unified',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis=dict(tickformat="%m-%d", tickangle=45, nticks=36)
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
+        xaxis=dict(tickformat="%m-%d", tickangle=45, nticks=36),
+        yaxis=dict(
+            title="积灰度 (%)", 
+            title_font=dict(color="purple", size=14),
+            tickfont=dict(color="purple"),
+            side='left'
+        ),
+        yaxis2=dict(
+            title="当日净现金流 ($)", 
+            title_font=dict(color="green", size=14),
+            tickfont=dict(color="green"), 
+            overlaying='y', 
+            side='right'
+        ),
     )
-    
-    if has_perfect:
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='green', size=10), name='✅ 推荐窗口 (少雨/高积灰)', hoverinfo='skip'))
-    if has_risk:
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='red', size=10), name='⚠️ 高风险窗口 (多雨/强制清洗)', hoverinfo='skip'))
         
     st.plotly_chart(fig, use_container_width=True)
     
     st.caption("""
-    **图表解读**:
+    **图表解读与国际标准说明**:
     - **紫色曲线**: 全年积灰自然累积趋势。
-    - **绿色阴影区域**: 系统推荐的**季度最佳清洗窗口**。
-    - **红色阴影区域**: **高风险窗口**。
-    """)
+    - **绿/红柱状图**: 当日实际净现金流。
+    - **⚠️ 清洗日收入下降说明**: 根据 IEC 61724 及运维规范，清洗过程中因组件物理遮挡（Shading）及安全停机，**正在清洗的区域无法发电**。
+      本模型已按 **{:.0f}% 的容量折损** 计算清洗日收益（即清洗日收入 = 正常收入 × {:.1f} - 清洗成本），因此清洗日的净现金流会显著低于平时，这是符合真实物理规律的。
+    """.format((1-dynamic_derating)*100, dynamic_derating))
 
 elif 'data_loaded' not in st.session_state:
     st.info("👈 请点击左上角的 **“生成季度固定清洗计划”** 按钮开始分析。")
 
 st.markdown("---")
-st.caption("Quarterly Fixed Schedule Planner v13.0 | Smart State Management")
+st.caption("Quarterly Fixed Schedule Planner v16.0 (Realistic Cleaning Derating)")

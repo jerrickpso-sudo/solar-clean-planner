@@ -7,8 +7,8 @@ import datetime
 
 # ================= 页面配置 =================
 st.set_page_config(
-    page_title="光伏电站季度固定清洗计划与智能优选",
-    page_icon="📅",
+    page_title="光伏电站季度固定清洗计划与智能优选 (夜间清洗版)",
+    page_icon="🌙",
     layout="wide"
 )
 
@@ -33,7 +33,7 @@ STATION_DB = {
 
 # ================= 侧边栏 =================
 st.sidebar.image("https://img.icons8.com/color/96/solar-panel.png", width=80)
-st.sidebar.header("📅 季度固定周期规划")
+st.sidebar.header("🌙 季度固定周期规划 (夜间清洗)")
 
 selected_station = st.sidebar.selectbox("📍 选择目标电站", list(STATION_DB.keys()), index=0)
 
@@ -45,7 +45,7 @@ current_params = {
     'capacity': 0,
     'robots': 0,
     'dust_rate': 0,
-    'manual_dates': {} # 新增：存储手动日期
+    'manual_dates': {} 
 }
 
 config_valid = True
@@ -69,10 +69,9 @@ if selected_station != "请选择电站...":
         **建议**: 增加机器人至 **{math.ceil(capacity_mw / (MAX_QUARTERLY_DAYS * ROBOT_EFFICIENCY_MW_PER_DAY))} 台** 以上。
         """)
     else:
+        # 🌙 [优化] 移除关于清洗日发电折损的警告，因为夜间清洗不影响白天发电
         st.sidebar.info(f"💡 **清洗能力**: {daily_capacity:.1f} MW/天\n**单次全站工期**: **{days_to_clean_all} 天**")
-        cleaning_loss_ratio = 1.0 / days_to_clean_all if days_to_clean_all > 0 else 0.2
-        dynamic_derating = max(0.5, 1.0 - cleaning_loss_ratio)
-        st.sidebar.success(f"**清洗日预计发电折损**: **{(1-dynamic_derating)*100:.1f}%**")
+        st.sidebar.success("**🌙 夜间清洗模式**: 清洗期间**无发电损失**，次日即可享受洁净增益。")
 
     st.sidebar.subheader("⚖️ 积灰模型参数")
     poll_idx = float(data['pollution_index'])
@@ -91,7 +90,7 @@ if selected_station != "请选择电站...":
     current_params['robots'] = robot_count
     current_params['dust_rate'] = effective_dust_rate
     
-    # ================= ✅ 新增：手动清洗时间输入窗口 =================
+    # ================= ✅ 手动清洗时间输入窗口 =================
     st.sidebar.markdown("---")
     st.sidebar.subheader("🛠️ 实际执行时间修正")
     st.sidebar.caption("留空则使用系统推荐，填入后强制覆盖。")
@@ -101,7 +100,6 @@ if selected_station != "请选择电站...":
     
     for q in range(1, 5):
         with st.sidebar.expander(f"🗓️ Q{q} 实际执行时间", expanded=False):
-            # 默认起始参考日期（简单估算，后续会被天气数据修正）
             default_start = today + datetime.timedelta(days=(q-1)*90)
             default_end = default_start + datetime.timedelta(days=days_to_clean_all-1)
             
@@ -109,12 +107,10 @@ if selected_station != "请选择电站...":
             m_end = st.date_input(f"Q{q} 结束日期", value=None, key=f"m_end_q{q}", help="手动输入实际完成清洗的日期")
             
             if m_start:
-                # 如果只填了开始，没填结束，自动推算结束日期
                 if not m_end:
                     m_end = m_start + datetime.timedelta(days=days_to_clean_all-1)
                     st.info(f"自动推算结束日期: {m_end}")
                 
-                # 校验逻辑
                 if m_end < m_start:
                     st.error("结束日期不能早于开始日期！")
                     config_valid = False
@@ -135,17 +131,15 @@ else:
     st.stop()
 
 params_changed = False
-# 比较参数是否变化（包括手动日期）
 if st.session_state.last_params != current_params:
     params_changed = True
     st.session_state.last_params = current_params.copy()
-    # 清除缓存数据以触发重新计算
     keys_to_clear = ['data_loaded', 'df_daily', 'rec_windows', 'filter_option']
     for k in keys_to_clear:
         if k in st.session_state:
             del st.session_state[k]
 
-st.title(f"📅 {selected_station} - 季度固定清洗计划与智能优选")
+st.title(f"🌙 {selected_station} - 季度固定清洗计划 (夜间作业)")
 
 if not config_valid:
     st.error(f"""
@@ -156,16 +150,15 @@ if not config_valid:
 
 st.markdown(f"**容量**: {capacity_mw} MW | **机器人**: {robot_count} 台 | **单次工期**: {days_to_clean_all} 天")
 
-# 检查是否有手动输入
 has_manual_input = any(v['is_manual'] for v in current_params['manual_dates'].values())
 if has_manual_input:
     st.info("🔧 **混合模式激活**: 部分季度已手动指定清洗时间，系统将基于实际执行时间重新计算积灰与收益。")
 else:
     st.info(f"""
-    **🏢 公司合规策略**:
+    **🏢 公司合规策略 (夜间清洗版)**:
     1. **固定频次**: 严格执行 **每季度清洗一次**。
     2. **气象驱动**: 基于 **历史实测辐射与降雨数据** 预测未来一年收益。
-    3. **真实工况**: 清洗期间容量折损约 {(1 - max(0.5, 1.0 - 1.0/days_to_clean_all))*100:.0f}%。
+    3. **零损耗作业**: 清洗在夜间进行，**白天发电无折损**，清洗完成后次日即刻提升效率。
     """)
 
 # ================= ✅ 核心修改：获取包含辐射量的天气数据 =================
@@ -209,7 +202,7 @@ def get_real_historical_climate(lat, lon):
         st.error(f"天气数据获取失败: {e}")
         return None
 
-def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust_rate, r_eff, clean_duration, derating_factor, manual_overrides):
+def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust_rate, r_eff, clean_duration, manual_overrides):
     dates = weather_data['time']
     rain = weather_data['precipitation_sum']
     radiation = weather_data['shortwave_radiation_sum']
@@ -217,11 +210,11 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
     HEAVY_RAIN_THRESHOLD = 5.0
     LIGHT_RAIN_THRESHOLD = 1.0
     
+    # 计算单次清洗总成本 (水 + 电)
     total_cleaning_cost = (capacity * WATER_CONSUMPTION_PER_MW) * p_water + (capacity * ENERGY_CONSUMPTION_PER_MW) * p_elec
     
     date_objs = [datetime.datetime.strptime(d, "%Y-%m-%d") for d in dates]
     step = len(dates) // 4
-    # 定义季度的大致日期范围用于推荐算法 fallback
     q_ranges = [(0, step-1), (step, 2*step-1), (2*step, 3*step-1), (3*step, len(dates)-1)]
     
     recommended_windows = []
@@ -247,24 +240,19 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
         q_num = q_idx + 1
         q_start_range, q_end_range = q_ranges[q_idx]
         
-        # 1. 检查是否有手动输入
         manual_info = manual_overrides.get(q_num, {})
         
         if manual_info.get('is_manual'):
             m_start_date = manual_info['start']
             m_end_date = manual_info['end']
             
-            # 将手动日期转换为索引
             try:
                 s_idx = dates.index(m_start_date.strftime("%Y-%m-%d"))
                 e_idx = dates.index(m_end_date.strftime("%Y-%m-%d"))
                 
-                # 验证工期长度是否合理（允许一定误差，但主要看用户输入）
                 actual_duration = e_idx - s_idx + 1
-                
                 avg_dust = sum(dust_series_natural[k] for k in range(s_idx, e_idx+1)) / actual_duration
                 
-                # 标记为手动
                 recommended_windows.append({
                     'q': q_num, 
                     'start_idx': s_idx, 
@@ -273,7 +261,7 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
                     'end_date': dates[e_idx],
                     'avg_dust': avg_dust, 
                     'cost': total_cleaning_cost, 
-                    'is_perfect': True, # 手动确认的视为完美执行
+                    'is_perfect': True, 
                     'is_manual': True
                 })
                 
@@ -282,11 +270,10 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
                     
             except ValueError:
                 st.warning(f"⚠️ Q{q_num} 的手动日期超出天气数据范围，该季度将回退到自动推荐。")
-                # 如果日期越界，回退到自动逻辑（下面代码会处理 best_start == -1 的情况）
                 pass
-            continue # 手动输入处理完毕，跳过自动推荐
+            continue 
 
-        # 2. 自动推荐逻辑 (如果没有手动输入)
+        # 自动推荐逻辑
         best_start = -1
         best_score = -1
         best_avg_dust = 0
@@ -309,6 +296,7 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
             if is_safe:
                 is_perfect = True
                 avg_dust = sum(dust_series_natural[k] for k in range(start, end+1)) / clean_duration
+                # 评分逻辑：积灰越高越需要洗，雨水越少越好
                 score = avg_dust * 10 + (10 - max_rain)
                 if score > best_score:
                     best_score = score
@@ -316,7 +304,6 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
                     best_avg_dust = avg_dust
         
         if best_start == -1: 
-            # 如果没有完美窗口，找雨最小的
             min_rain_sum = 99999
             for start in range(q_start_range, q_end_range - clean_duration + 1):
                 r_sum = sum(rain[k] for k in range(start, start+clean_duration))
@@ -342,17 +329,22 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
     # --- 第三步：生成最终积灰序列 (基于确定的窗口) ---
     final_dust_series = list(dust_series_natural)
     
-    # 按时间顺序排序窗口，防止逻辑混乱
     recommended_windows.sort(key=lambda x: x['start_idx'])
 
     for w in recommended_windows:
         clean_end_day = w['end_idx']
-        # 清洗结束后的第一天，积灰归零 (模拟清洗效果)
-        if clean_end_day + 1 < len(final_dust_series):
-            final_dust_series[clean_end_day + 1] = 0.5 
+        
+        # 🌙 [优化] 夜间清洗逻辑：
+        # 清洗工作在第 clean_end_day 的晚上完成。
+        # 因此，第 clean_end_day + 1 天 (如果存在) 的早晨，积灰度应直接归零 (或接近0)。
+        # 注意：清洗期间 (start 到 end) 的白天，积灰度仍然按照自然累积计算，因为还没洗。
+        
+        next_day_idx = clean_end_day + 1
+        if next_day_idx < len(final_dust_series):
+            final_dust_series[next_day_idx] = 0.2 # 设置为一个很小的值，代表刚洗完
         
         # 重新计算清洗结束后的每一天
-        for k in range(clean_end_day + 2, len(final_dust_series)):
+        for k in range(next_day_idx + 1, len(final_dust_series)):
             r = rain[k]
             prev_dust = final_dust_series[k-1]
             
@@ -383,19 +375,24 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
         efficiency_loss_factor = min(d_val / 100.0, 1.0)
         
         if is_rec and q_info:
-            # 区分手动和自动标签
             if q_info.get('is_manual'):
-                status = f"🔧 Q{q_info['q']} 手动执行"
-                color = "blue" # 用蓝色表示手动
+                status = f"🔧 Q{q_info['q']} 手动执行 (夜)"
+                color = "blue"
             else:
-                status = f"📅 Q{q_info['q']} 推荐" if q_info['is_perfect'] else f"⚠️ Q{q_info['q']} 高风险"
+                status = f"📅 Q{q_info['q']} 推荐 (夜)" if q_info['is_perfect'] else f"⚠️ Q{q_info['q']} 高风险 (夜)"
                 color = "green" if q_info['is_perfect'] else "red"
             
-            action = "Scheduled Cleaning"
+            action = "Night Cleaning"
+            
+            # 🌙 [优化] 夜间清洗不扣除白天发电量！
+            # actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor) 
+            # 这里的 logic 是：当天的积灰度 d_val 是白天累积的结果，晚上才洗。
+            # 所以当天的发电损失是基于当天白天的积灰情况计算的，这是合理的。
+            # 区别在于：不再额外乘以 derating_factor (之前代码里的 0.5~0.9 系数)。
+            
+            actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor)
             
             # 成本只在开始那天计入，或者分摊，这里保持原逻辑：开始那天计入总成本
-            # 注意：原代码逻辑是 i == start_idx 时计入 total_cleaning_cost
-            actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor) * derating_factor
             daily_cost = total_cleaning_cost if i == q_info['start_idx'] else 0
             profit = actual_revenue - daily_cost
         else:
@@ -431,12 +428,13 @@ if st.button("🔍 生成/更新季度固定清洗计划", type="primary"):
     weather = get_real_historical_climate(LATITUDE, LONGITUDE)
     
     if weather:
-        st.success(f"✅ **规划就绪**: 已加载实测辐射数据。")
+        st.success(f"✅ **规划就绪**: 已加载实测辐射数据 (夜间清洗模式)。")
+        
+        # 🌙 [优化] 移除了 derating_factor 参数传递，因为不再需要
         df_daily, rec_windows, RAIN_THRESHOLD = analyze_quarterly_plan(
             weather, capacity_mw, sell_price, robot_elec_price, water_price, 
             effective_dust_rate, robot_eff, days_to_clean_all, 
-            max(0.5, 1.0 - 1.0/days_to_clean_all),
-            current_params['manual_dates'] # 传入手动日期参数
+            current_params['manual_dates']
         )
         
         st.session_state['df_daily'] = df_daily
@@ -460,19 +458,18 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
             date_range = f"{w['start_date'][5:]} ~ {w['end_date'][5:]}"
             detail = f"积灰:{w['avg_dust']:.1f}% | 成本:${w['cost']:,.0f}"
             
-            # 判断是否是手动
             is_manual = w.get('is_manual', False)
             
             with cols[i]:
                 if is_manual:
                     st.metric(f"🔧 Q{i+1} (手动)", date_range, help=detail)
-                    st.info(f"**已锁定执行**\n{detail}", icon="🔒")
+                    st.info(f"**已锁定执行 (夜)**\n{detail}", icon="🔒")
                 elif w['is_perfect']:
                     st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
-                    st.success(f"**推荐窗口**\n{detail}", icon="✅")
+                    st.success(f"**推荐窗口 (夜)**\n{detail}", icon="✅")
                 else:
                     st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
-                    st.error(f"**高风险窗口**\n{detail}", icon="⚠️")
+                    st.error(f"**高风险窗口 (夜)**\n{detail}", icon="⚠️")
     
     net_profit = df_daily['当日净现金流 ($)'].sum()
     st.info(f"**💰 年度预估总清洗成本**: ${total_cost:,.1f} | **年度预估净收益**: ${net_profit:,.1f}")
@@ -483,7 +480,7 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     st.subheader("📅 季度固定清洗执行计划表")
     
     with st.container():
-        filter_options = ["显示所有日期", "仅显示 📅/🔧 清洗期", "仅显示 ⚠️ 高风险清洗期"]
+        filter_options = ["显示所有日期", "仅显示 🌙 清洗期", "仅显示 ⚠️ 高风险清洗期"]
         
         if 'filter_option' not in st.session_state:
             st.session_state.filter_option = filter_options[0]
@@ -499,15 +496,15 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
 
     display_df = df_daily.copy()
     
-    if selected_filter == "仅显示 📅/🔧 清洗期":
-        display_df = display_df[display_df['行动'] == "Scheduled Cleaning"]
+    if selected_filter == "仅显示 🌙 清洗期":
+        display_df = display_df[display_df['行动'] == "Night Cleaning"]
     elif selected_filter == "仅显示 ⚠️ 高风险清洗期":
-        display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'red')]
+        display_df = display_df[(display_df['行动'] == "Night Cleaning") & (display_df['状态颜色'] == 'red')]
     
     def color_code(val):
         if val is None: return ""
         val_str = str(val)
-        if "手动" in val_str: return "color: white; font-weight: bold; background-color: #2563eb;" # Blue for manual
+        if "手动" in val_str: return "color: white; font-weight: bold; background-color: #2563eb;" 
         if "推荐" in val_str: return "color: white; font-weight: bold; background-color: #16a34a;"
         if "高风险" in val_str: return "color: white; font-weight: bold; background-color: #dc2626;"
         if "较少" in val_str: return "color: gray; background-color: #f3f4f6;"
@@ -541,7 +538,7 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     )
     
     csv = display_df[columns_to_show].to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 下载季度计划 CSV", data=csv, file_name='quarterly_plan.csv', mime='text/csv')
+    st.download_button("📥 下载季度计划 CSV", data=csv, file_name='quarterly_plan_night.csv', mime='text/csv')
     
     st.divider()
     
@@ -576,16 +573,15 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     ))
     
     for w in rec_windows:
-        # 手动用蓝色，自动完美用绿色，自动高风险用红色
         if w.get('is_manual'):
             color = 'blue'
-            label = f"Q{w['q']} 手动"
+            label = f"Q{w['q']} 手动 (夜)"
         elif w['is_perfect']:
             color = 'green'
-            label = f"Q{w['q']} 推荐"
+            label = f"Q{w['q']} 推荐 (夜)"
         else:
             color = 'red'
-            label = f"Q{w['q']} 高风险"
+            label = f"Q{w['q']} 高风险 (夜)"
             
         fig.add_vrect(
             x0=w['start_date'], 
@@ -631,19 +627,18 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
         - **数据提供商**: [Open-Meteo Historical Archive API](https://open-meteo.com/)
         - **获取内容**: 过去 365 天的实测逐日数据。
         
-        #### 2. 手动干预逻辑
-        - 当用户在侧边栏输入 **实际开始/结束日期** 后：
-          1. 系统忽略该季度的自动推荐算法。
-          2. 强制将选定日期范围内的积灰度在结束后重置。
-          3. 图表中该时间段标记为 **蓝色 (手动执行)**。
-          4. 若只输入开始日期，系统根据 **机器人数量与装机容量** 自动推算结束日期。
+        #### 2. 夜间清洗逻辑 (重要更新)
+        - **发电无损**: 清洗工作安排在日落后进行，**不占用白天发电时间**。
+        - **收益计算**: 清洗期间的白天发电量仅受**当日积灰程度**影响，**不再施加额外的工期折损系数**。
+        - **积灰重置**: 清洗结束后的**次日清晨**，积灰度立即重置为接近 0%。
+        - **手动干预**: 用户输入的日期被视为“开始清洗”到“完成清洗”的周期，系统在周期结束后的第二天应用洁净效果。
 
         #### 3. 物理模型
         - **等效日照**: 辐射量 / 3.6
         - **积灰累积**: 无雨时线性增加，大雨清零，小雨减半。
         """)
 
-    st.caption("Quarterly Fixed Schedule Planner v1.0 (Jerrick_PSO_China)")
+    st.caption("Quarterly Fixed Schedule Planner v1.1 (Night_Cleaning_Optimized)")
 
 elif 'data_loaded' not in st.session_state:
     if config_valid:

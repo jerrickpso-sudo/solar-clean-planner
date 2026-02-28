@@ -7,7 +7,7 @@ import datetime
 
 # ================= 页面配置 =================
 st.set_page_config(
-    page_title="光伏电站季度固定清洗计划与智能优选_项目部",
+    page_title="光伏电站季度固定清洗计划与智能优选",
     page_icon="📅",
     layout="wide"
 )
@@ -38,6 +38,17 @@ st.sidebar.header("📅 季度固定周期规划")
 
 selected_station = st.sidebar.selectbox("📍 选择目标电站", list(STATION_DB.keys()), index=0)
 
+# 初始化侧边栏参数监控
+if 'last_params' not in st.session_state:
+    st.session_state.last_params = {}
+
+current_params = {
+    'station': selected_station,
+    'capacity': 0,
+    'robots': 0,
+    'dust_rate': 0
+}
+
 if selected_station != "请选择电站...":
     data = STATION_DB[selected_station]
     st.sidebar.subheader("⚙️ 电站规模与配置")
@@ -62,8 +73,27 @@ if selected_station != "请选择电站...":
     robot_eff = float(data['robot_efficiency'])
     LATITUDE = float(data['lat'])
     LONGITUDE = float(data['lon'])
+    
+    # 更新当前参数用于比对
+    current_params['capacity'] = capacity_mw
+    current_params['robots'] = robot_count
+    current_params['dust_rate'] = effective_dust_rate
 else:
     st.stop()
+
+# ================= 核心逻辑：参数变更检测 =================
+# 检查侧边栏参数是否发生变化
+params_changed = False
+if st.session_state.last_params != current_params:
+    params_changed = True
+    st.session_state.last_params = current_params.copy()
+    # 如果参数变了，清除旧数据和过滤状态，强制重置
+    if 'data_loaded' in st.session_state:
+        del st.session_state['data_loaded']
+        del st.session_state['df_daily']
+        del st.session_state['rec_windows']
+    if 'filter_option' in st.session_state:
+        del st.session_state['filter_option']
 
 # ================= 主界面 =================
 st.title(f"📅 {selected_station} - 季度固定清洗计划与智能优选")
@@ -74,7 +104,7 @@ st.info(f"""
 2. **智能优选**: 在每个季度内，自动扫描并推荐 **连续{days_to_clean_all}天无暴雨 (<10mm)** 且 **积灰度最高** 的最佳时间段。
 """)
 
-# ================= 核心逻辑 =================
+# ================= 核心逻辑函数 =================
 
 @st.cache_data(ttl=3600)
 def get_real_historical_climate(lat, lon):
@@ -216,101 +246,131 @@ if st.button("🔍 生成季度固定清洗计划", type="primary"):
             effective_dust_rate, robot_eff, days_to_clean_all
         )
         
-        # --- 顶部统计 ---
-        st.subheader("📊 年度季度清洗计划概览")
-        cols = st.columns(4)
-        total_cost = 0
-        for i, col in enumerate(cols):
-            if i < len(rec_windows):
-                w = rec_windows[i]
-                total_cost += w['cost']
-                date_range = f"{w['start_date'][5:]} ~ {w['end_date'][5:]}"
-                detail = f"积灰:{w['avg_dust']:.1f}% | 成本:${w['cost']:,.0f}"
-                if w['is_perfect']:
-                    col.metric(f"🗓️ Q{i+1}", date_range, help=detail)
-                    col.success(f"**推荐窗口**\n{detail}", icon="✅")
-                else:
-                    col.metric(f"🗓️ Q{i+1}", date_range, help=detail)
-                    col.error(f"**高风险窗口**\n{detail}", icon="⚠️")
-        st.info(f"**💰 年度预估总清洗成本**: ${total_cost:,.1f}")
-        st.divider()
-        
-        # --- 表格 ---
-        st.subheader("📅 季度固定清洗执行计划表")
-        filter_opt = st.radio("🔍 视图过滤:", ["显示所有日期", "仅显示 📅 推荐清洗期", "仅显示 ⚠️ 高风险清洗期"], horizontal=True)
-        display_df = df_daily.copy()
-        if filter_opt == "仅显示 📅 推荐清洗期":
-            display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'green')]
-        elif filter_opt == "仅显示 ⚠️ 高风险清洗期":
-            display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'red')]
-        
-        def color_code(val):
-            if "推荐" in val: return "color: white; font-weight: bold; background-color: #16a34a;"
-            if "高风险" in val: return "color: white; font-weight: bold; background-color: #dc2626;"
-            if "较少" in val: return "color: gray; background-color: #f3f4f6;"
-            if "累积" in val: return "color: orange; background-color: #ffedd5;"
-            return ""
-        
-        st.dataframe(display_df.style.applymap(color_code, subset=['操作建议']).format({"当日净现金流 ($)": "${:.1f}", "动态积灰度 (%)": "{:.1f}%"}), use_container_width=True, hide_index=True, height=400)
-        st.download_button("📥 下载季度计划 CSV", data=display_df.to_csv(index=False).encode('utf-8-sig'), file_name='quarterly_plan.csv', mime='text/csv')
-        st.divider()
-        
-        # --- 可视化 (绝对纯净版：移除所有可能导致错误的属性) ---
-        st.subheader("📈 全年积灰趋势与季度固定清洗窗口")
-        
-        fig = go.Figure()
-        
-        # 1. 积灰曲线
-        fig.add_trace(go.Scatter(
-            x=df_daily['日期'], y=df_daily['动态积灰度 (%)'],
-            mode='lines', name='动态积灰度 (%)',
-            line=dict(color='purple', width=2),
-            fill='tozeroy', fillcolor='rgba(128, 0, 128, 0.1)'
-        ))
-        
-        # 2. 添加阴影区域 (只保留最基础的绘图属性)
-        has_perfect = any(w['is_perfect'] for w in rec_windows)
-        has_risk = any(not w['is_perfect'] for w in rec_windows)
-        
-        for w in rec_windows:
-            color = 'green' if w['is_perfect'] else 'red'
-            # 修复：仅使用 x0, x1, fillcolor, opacity, line_width
-            # 移除了 annotation_text, hovertemplate, hoverlabel 等所有高级属性
-            fig.add_vrect(
-                x0=w['start_date'], 
-                x1=w['end_date'],
-                fillcolor=color, 
-                opacity=0.25,
-                line_width=0
-            )
-        
-        fig.update_layout(
-            height=500, margin=dict(l=0, r=0, t=30, b=0),
-            xaxis_title="日期", yaxis_title="积灰度 (%)",
-            hovermode='x unified',
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            xaxis=dict(tickformat="%m-%d", tickangle=45, nticks=36)
-        )
-        
-        # 3. 手动添加图例 (使用不可见的散点)
-        if has_perfect:
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='green', size=10), name='✅ 推荐窗口 (少雨/高积灰)', hoverinfo='skip'))
-        if has_risk:
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='red', size=10), name='⚠️ 高风险窗口 (多雨/强制清洗)', hoverinfo='skip'))
-            
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.caption("""
-        **图表解读**:
-        - **紫色曲线**: 全年积灰自然累积趋势。
-        - **绿色阴影区域**: 系统推荐的**季度最佳清洗窗口** (天气好且积灰高)。
-        - **红色阴影区域**: **高风险窗口** (该季度雨水较多，但为满足季度任务必须执行)。
-        - 详细信息请查看上方的**季度概览卡片**。
-        """)
+        # 将数据存入 session_state
+        st.session_state['df_daily'] = df_daily
+        st.session_state['rec_windows'] = rec_windows
+        st.session_state['data_loaded'] = True
+        # 注意：这里不设置 filter_option，让它保持用户之前的选择（如果有）
+        # 如果是因为侧边栏变化导致的数据清空，上面的检测逻辑已经删除了 filter_option
+        # 如果是首次加载，下面的逻辑会初始化它
 
-    else:
-        st.error("❌ **数据获取失败**：无法下载真实历史数据。")
-        st.stop()
+# 从 session_state 读取数据（如果存在）
+if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
+    df_daily = st.session_state['df_daily']
+    rec_windows = st.session_state['rec_windows']
+    
+    # --- 顶部统计 ---
+    st.subheader("📊 年度季度清洗计划概览")
+    cols = st.columns(4)
+    total_cost = 0
+    for i, w in enumerate(rec_windows):
+        total_cost += w['cost']
+        if i < 4:
+            date_range = f"{w['start_date'][5:]} ~ {w['end_date'][5:]}"
+            detail = f"积灰:{w['avg_dust']:.1f}% | 成本:${w['cost']:,.0f}"
+            with cols[i]:
+                if w['is_perfect']:
+                    st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
+                    st.success(f"**推荐窗口**\n{detail}", icon="✅")
+                else:
+                    st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
+                    st.error(f"**高风险窗口**\n{detail}", icon="⚠️")
+    
+    st.info(f"**💰 年度预估总清洗成本**: ${total_cost:,.1f}")
+    st.divider()
+    
+    # --- 表格 (智能状态管理) ---
+    st.subheader("📅 季度固定清洗执行计划表")
+    
+    filter_options = ["显示所有日期", "仅显示 📅 推荐清洗期", "仅显示 ⚠️ 高风险清洗期"]
+    
+    # 初始化：只有当 filter_option 不存在时才设为默认值
+    if 'filter_option' not in st.session_state:
+        st.session_state.filter_option = filter_options[0]
+    
+    # 使用 radio 组件，绑定 key
+    selected_filter = st.radio(
+        "🔍 视图过滤:", 
+        filter_options, 
+        horizontal=True,
+        key='filter_option'
+    )
+    
+    # 根据选择过滤数据
+    display_df = df_daily.copy()
+    if selected_filter == "仅显示 📅 推荐清洗期":
+        display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'green')]
+    elif selected_filter == "仅显示 ⚠️ 高风险清洗期":
+        display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'red')]
+    
+    def color_code(val):
+        if "推荐" in val: return "color: white; font-weight: bold; background-color: #16a34a;"
+        if "高风险" in val: return "color: white; font-weight: bold; background-color: #dc2626;"
+        if "较少" in val: return "color: gray; background-color: #f3f4f6;"
+        if "累积" in val: return "color: orange; background-color: #ffedd5;"
+        return ""
+    
+    st.dataframe(
+        display_df.style.applymap(color_code, subset=['操作建议'])
+        .format({"当日净现金流 ($)": "${:.1f}", "动态积灰度 (%)": "{:.1f}%"}), 
+        use_container_width=True, 
+        hide_index=True, 
+        height=400
+    )
+    
+    csv = display_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button("📥 下载季度计划 CSV", data=csv, file_name='quarterly_plan.csv', mime='text/csv')
+    st.divider()
+    
+    # --- 可视化 ---
+    st.subheader("📈 全年积灰趋势与季度固定清洗窗口")
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=df_daily['日期'], y=df_daily['动态积灰度 (%)'],
+        mode='lines', name='动态积灰度 (%)',
+        line=dict(color='purple', width=2),
+        fill='tozeroy', fillcolor='rgba(128, 0, 128, 0.1)'
+    ))
+    
+    has_perfect = any(w['is_perfect'] for w in rec_windows)
+    has_risk = any(not w['is_perfect'] for w in rec_windows)
+    
+    for w in rec_windows:
+        color = 'green' if w['is_perfect'] else 'red'
+        fig.add_vrect(
+            x0=w['start_date'], 
+            x1=w['end_date'],
+            fillcolor=color, 
+            opacity=0.25,
+            line_width=0
+        )
+    
+    fig.update_layout(
+        height=500, margin=dict(l=0, r=0, t=30, b=0),
+        xaxis_title="日期", yaxis_title="积灰度 (%)",
+        hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis=dict(tickformat="%m-%d", tickangle=45, nticks=36)
+    )
+    
+    if has_perfect:
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='green', size=10), name='✅ 推荐窗口 (少雨/高积灰)', hoverinfo='skip'))
+    if has_risk:
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(color='red', size=10), name='⚠️ 高风险窗口 (多雨/强制清洗)', hoverinfo='skip'))
+        
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.caption("""
+    **图表解读**:
+    - **紫色曲线**: 全年积灰自然累积趋势。
+    - **绿色阴影区域**: 系统推荐的**季度最佳清洗窗口**。
+    - **红色阴影区域**: **高风险窗口**。
+    """)
+
+elif 'data_loaded' not in st.session_state:
+    st.info("👈 请点击左上角的 **“生成季度固定清洗计划”** 按钮开始分析。")
 
 st.markdown("---")
-st.caption("Quarterly Fixed Schedule Planner v12.5 | Pure Stable Plotly Rendering")
+st.caption("Quarterly Fixed Schedule Planner v13.0 | Smart State Management")

@@ -21,8 +21,7 @@ DUST_ACCUMULATION_RATE = 0.4
 RAIN_CLEANING_THRESHOLD = 5.0
 RAIN_CLEANING_EFFICIENCY = 0.9
 MAX_DUST_CAPACITY = 15.0
-AVG_SUN_HOURS_PER_DAY = 5.5 
-MAX_QUARTERLY_DAYS = 92 # 一个季度最多92天，作为工期上限
+MAX_QUARTERLY_DAYS = 92 
 
 # ================= 核心数据库 =================
 STATION_DB = {
@@ -50,7 +49,7 @@ current_params = {
     'dust_rate': 0
 }
 
-config_valid = True # 标记配置是否合法
+config_valid = True
 
 if selected_station != "请选择电站...":
     data = STATION_DB[selected_station]
@@ -63,23 +62,15 @@ if selected_station != "请选择电站...":
     daily_capacity = robot_count * ROBOT_EFFICIENCY_MW_PER_DAY
     days_to_clean_all = math.ceil(capacity_mw / daily_capacity) if daily_capacity > 0 else 999
     
-    # ✅ 新增：配置合法性检查
     if days_to_clean_all > MAX_QUARTERLY_DAYS:
         config_valid = False
         st.sidebar.error(f"""
         ⚠️ **配置不可行！**
-        
-        当前工期：**{days_to_clean_all} 天**
-        季度上限：**{MAX_QUARTERLY_DAYS} 天**
-        
-        **原因**: 机器人数量不足以在季度内完成清洗。
-        **建议**: 
-        1. 增加机器人至 **{math.ceil(capacity_mw / (MAX_QUARTERLY_DAYS * ROBOT_EFFICIENCY_MW_PER_DAY))} 台** 以上。
-        2. 或减小模拟容量。
+        当前工期：**{days_to_clean_all} 天** (超过季度上限 {MAX_QUARTERLY_DAYS} 天)
+        **建议**: 增加机器人至 **{math.ceil(capacity_mw / (MAX_QUARTERLY_DAYS * ROBOT_EFFICIENCY_MW_PER_DAY))} 台** 以上。
         """)
     else:
         st.sidebar.info(f"💡 **清洗能力**: {daily_capacity:.1f} MW/天\n**单次全站工期**: **{days_to_clean_all} 天**")
-        
         cleaning_loss_ratio = 1.0 / days_to_clean_all if days_to_clean_all > 0 else 0.2
         dynamic_derating = max(0.5, 1.0 - cleaning_loss_ratio)
         st.sidebar.success(f"**清洗日预计发电折损**: **{(1-dynamic_derating)*100:.1f}%**")
@@ -116,27 +107,22 @@ if st.session_state.last_params != current_params:
 
 st.title(f"📅 {selected_station} - 季度固定清洗计划与智能优选")
 
-# ✅ 在主界面也显示阻断警告
 if not config_valid:
     st.error(f"""
     ### 🛑 无法生成计划：配置超出季度限制
-    
-    当前设置的 **{capacity_mw} MW** 容量配合 **{robot_count} 台** 机器人，需要 **{days_to_clean_all} 天** 才能清洗完毕。
-    这超过了单个季度的天数（约90天），导致无法执行“季度固定清洗”策略。
-    
-    **请返回左侧侧边栏调整参数：**
-    - 建议将机器人数量增加到 **{math.ceil(capacity_mw / (MAX_QUARTERLY_DAYS * ROBOT_EFFICIENCY_MW_PER_DAY))} 台**。
+    请返回左侧侧边栏调整参数。
     """)
-    st.stop() # 停止执行后续代码，防止报错
+    st.stop()
 
 st.markdown(f"**容量**: {capacity_mw} MW | **机器人**: {robot_count} 台 | **单次工期**: {days_to_clean_all} 天")
 st.info(f"""
 **🏢 公司合规策略**:
-1. **固定频次**: 严格执行 **每季度清洗一次** (全年共4次)。
-2. **智能优选**: 在每个季度内，自动扫描并推荐 **连续{days_to_clean_all}天无暴雨 (<10mm)** 且 **积灰度最高** 的最佳时间段。
-3. **真实工况模拟**: 清洗期间，因组件遮挡和安全规范，**当日发电容量将折损约 {(1 - max(0.5, 1.0 - 1.0/days_to_clean_all))*100:.0f}%**。
+1. **固定频次**: 严格执行 **每季度清洗一次**。
+2. **气象驱动**: 基于 **历史实测辐射与降雨数据** 预测未来一年收益，真实反映阴雨天发电量波动。
+3. **真实工况**: 清洗期间容量折损约 {(1 - max(0.5, 1.0 - 1.0/days_to_clean_all))*100:.0f}%。
 """)
 
+# ================= ✅ 核心修改：获取包含辐射量的天气数据 =================
 @st.cache_data(ttl=3600)
 def get_real_historical_climate(lat, lon):
     end_date = datetime.datetime.now()
@@ -146,35 +132,48 @@ def get_real_historical_climate(lat, lon):
         "latitude": lat, "longitude": lon,
         "start_date": start_date.strftime("%Y-%m-%d"),
         "end_date": end_date.strftime("%Y-%m-%d"),
-        "daily": ["precipitation_sum", "wind_speed_10m_max"],
+        # 新增：shortwave_radiation_sum (日总辐射量 MJ/m²)
+        "daily": ["precipitation_sum", "wind_speed_10m_max", "shortwave_radiation_sum"],
         "timezone": "America/Manaus"
     }
     try:
-        with st.spinner("正在下载过去365天逐日实测数据..."):
+        with st.spinner("正在下载过去365天实测辐射与降雨数据..."):
             response = requests.get(url, params=params, timeout=15)
             response.raise_for_status()
             data = response.json()
-            if 'daily' not in data or 'precipitation_sum' not in data['daily']:
+            
+            if 'daily' not in data or 'shortwave_radiation_sum' not in data['daily']:
                 return None
+            
             real_rain = data['daily']['precipitation_sum']
             real_wind = data['daily']['wind_speed_10m_max']
+            real_radiation = data['daily']['shortwave_radiation_sum'] # 获取辐射数据
+            
             if len(real_rain) < 300: return None
+            
             future_start = datetime.datetime.now() + datetime.timedelta(days=1)
             future_dates = [(future_start + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(len(real_rain))]
-            return {"time": future_dates, "precipitation_sum": real_rain, "wind_speed_10m_max": real_wind}
+            
+            return {
+                "time": future_dates, 
+                "precipitation_sum": real_rain, 
+                "wind_speed_10m_max": real_wind,
+                "shortwave_radiation_sum": real_radiation # 返回辐射数据
+            }
     except Exception as e:
+        st.error(f"天气数据获取失败: {e}")
         return None
 
 def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust_rate, r_eff, clean_duration, derating_factor):
     dates = weather_data['time']
     rain = weather_data['precipitation_sum']
+    radiation = weather_data['shortwave_radiation_sum'] # 获取辐射列表
     RAIN_THRESHOLD = 10.0
     
     total_cleaning_cost = (capacity * WATER_CONSUMPTION_PER_MW) * p_water + (capacity * ENERGY_CONSUMPTION_PER_MW) * p_elec
     
     date_objs = [datetime.datetime.strptime(d, "%Y-%m-%d") for d in dates]
     step = len(dates) // 4
-    # 确保季度划分不越界
     q_ranges = [(0, step-1), (step, 2*step-1), (2*step, 3*step-1), (3*step, len(dates)-1)]
     
     daily_plans = []
@@ -199,10 +198,8 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
         best_avg_dust = 0
         is_perfect = False
         
-        # ✅ 增加边界检查：如果季度剩余天数不足清洗工期，跳过或取最大值
         available_days = q_end - q_start + 1
         if available_days < clean_duration:
-            # 这种情况通常不会发生，因为前面已经拦截了，但为了健壮性保留
             continue
             
         for start in range(q_start, q_end - clean_duration + 1):
@@ -234,14 +231,12 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
             if best_start != -1:
                 avg_dust = sum(dust_series[k] for k in range(best_start, best_start+clean_duration))/clean_duration
             else:
-                # 极端情况：连最短窗口都找不到（数据缺失等），跳过该季度
                 continue
         else:
             avg_dust = best_avg_dust
             
         if best_start != -1:
             for k in range(best_start, best_start + clean_duration): chosen_days.add(k)
-            
             recommended_windows.append({
                 'q': idx + 1, 'start_idx': best_start, 'end_idx': best_start + clean_duration - 1,
                 'start_date': dates[best_start], 'end_date': dates[best_start + clean_duration - 1],
@@ -256,7 +251,14 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
         is_rec = i in chosen_days
         q_info = next((w for w in recommended_windows if w['start_idx'] <= i <= w['end_idx']), None)
         
-        theoretical_revenue = capacity * AVG_SUN_HOURS_PER_DAY * 1000 * p_sell
+        # ✅ 核心修复：根据真实辐射量计算当日发电能力
+        # 辐射量单位是 MJ/m²，转换为 kWh/m² (除以 3.6) 即为等效峰值日照时数
+        # 例如：20 MJ/m² ≈ 5.55 kWh/m² ≈ 5.55 小时满发
+        daily_sun_hours = radiation[i] / 3.6
+        
+        # 理论收益 = 容量 * 当日实际日照时数 * 电价
+        theoretical_revenue = capacity * daily_sun_hours * 1000 * p_sell
+        
         efficiency_loss_factor = min(dust_series[i] / 100.0, 1.0)
         
         if is_rec and q_info:
@@ -264,6 +266,7 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
             color = "green" if q_info['is_perfect'] else "red"
             action = "Scheduled Cleaning"
             
+            # 清洗日：收入受辐射影响 + 积灰影响 + 清洗遮挡折损
             actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor) * derating_factor
             daily_cost = total_cleaning_cost if i == q_info['start_idx'] else 0
             profit = actual_revenue - daily_cost
@@ -273,13 +276,17 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
             color = "gray" if d_val < 3.0 else "orange"
             action = "Monitor"
             
+            # 非清洗日：收入受辐射影响 + 积灰影响
             actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor)
             daily_cost = 0
             profit = actual_revenue
 
         daily_plans.append({
             "日期": dates[i], "星期": wk_map.get(weekday_cn, ""), "季度": (i // step) + 1,
-            "实测降雨 (mm)": round(rain[i], 1), "动态积灰度 (%)": round(dust_series[i], 1),
+            "实测降雨 (mm)": round(rain[i], 1), 
+            "日辐射量 (MJ/m²)": round(radiation[i], 1), # 新增显示辐射量
+            "等效日照 (h)": round(daily_sun_hours, 1), # 新增显示日照时数
+            "动态积灰度 (%)": round(dust_series[i], 1),
             "操作建议": status, "状态颜色": color, "行动": action,
             "当日净现金流 ($)": round(profit, 1), "month_num": date_obj.month
         })
@@ -290,7 +297,7 @@ if st.button("🔍 生成季度固定清洗计划", type="primary"):
     weather = get_real_historical_climate(LATITUDE, LONGITUDE)
     
     if weather:
-        st.success(f"✅ **规划就绪**: 已划分4个季度并优选最佳窗口。")
+        st.success(f"✅ **规划就绪**: 已加载实测辐射数据。")
         df_daily, rec_windows, RAIN_THRESHOLD = analyze_quarterly_plan(
             weather, capacity_mw, sell_price, robot_elec_price, water_price, 
             effective_dust_rate, robot_eff, days_to_clean_all, max(0.5, 1.0 - 1.0/days_to_clean_all)
@@ -304,13 +311,13 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     df_daily = st.session_state['df_daily']
     rec_windows = st.session_state['rec_windows']
     
+    # --- 第一部分：顶部概览 (不受遮挡) ---
     st.subheader("📊 年度季度清洗计划概览")
     cols = st.columns(4)
     total_cost = 0
     
-    # 处理可能因为工期过长导致某些季度没有窗口的情况
     if len(rec_windows) < 4:
-        st.warning(f"⚠️ 由于工期较长 ({days_to_clean_all}天)，部分季度未能找到合适的无雨窗口，仅生成了 {len(rec_windows)} 个季度的计划。")
+        st.warning(f"⚠️ 由于工期较长，仅生成了 {len(rec_windows)} 个季度的计划。")
     
     for i, w in enumerate(rec_windows):
         total_cost += w['cost']
@@ -327,22 +334,33 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     
     net_profit = df_daily['当日净现金流 ($)'].sum()
     st.info(f"**💰 年度预估总清洗成本**: ${total_cost:,.1f} | **年度预估净收益**: ${net_profit:,.1f}")
+    
+    # 【关键修改 1】增加垂直间距，防止下方图表工具栏上浮遮挡
+    st.markdown("<br>", unsafe_allow_html=True) 
     st.divider()
     
+    # --- 第二部分：控制区 (放在表格和图表之前，确保点击区域干净) ---
     st.subheader("📅 季度固定清洗执行计划表")
     
-    filter_options = ["显示所有日期", "仅显示 📅 推荐清洗期", "仅显示 ⚠️ 高风险清洗期"]
-    
-    if 'filter_option' not in st.session_state:
-        st.session_state.filter_option = filter_options[0]
-    
-    selected_filter = st.radio(
-        "🔍 视图过滤:", 
-        filter_options, 
-        horizontal=True,
-        key='filter_option'
-    )
-    
+    # 使用 container 包裹筛选器，增加独立性
+    with st.container():
+        filter_options = ["显示所有日期", "仅显示 📅 推荐清洗期", "仅显示 ⚠️ 高风险清洗期"]
+        
+        if 'filter_option' not in st.session_state:
+            st.session_state.filter_option = filter_options[0]
+        
+        # 将 radio 放在这里，它下方紧接着就是表格，但上方有 divider 保护
+        selected_filter = st.radio(
+            "🔍 视图过滤:", 
+            filter_options, 
+            horizontal=True,
+            key='filter_option',
+            label_visibility="collapsed" # 可选：如果标题多余可以隐藏，保留上面的 subheader 即可
+        )
+        # 再次增加一点间距，确保表格的悬浮菜单不遮挡 radio
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    # --- 第三部分：数据表格 ---
     display_df = df_daily.copy()
     if selected_filter == "仅显示 📅 推荐清洗期":
         display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'green')]
@@ -350,20 +368,28 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
         display_df = display_df[(display_df['行动'] == "Scheduled Cleaning") & (display_df['状态颜色'] == 'red')]
     
     def color_code(val):
-        if "推荐" in val: return "color: white; font-weight: bold; background-color: #16a34a;"
-        if "高风险" in val: return "color: white; font-weight: bold; background-color: #dc2626;"
-        if "较少" in val: return "color: gray; background-color: #f3f4f6;"
-        if "累积" in val: return "color: orange; background-color: #ffedd5;"
+        if val is None: return ""
+        if "推荐" in str(val): return "color: white; font-weight: bold; background-color: #16a34a;"
+        if "高风险" in str(val): return "color: white; font-weight: bold; background-color: #dc2626;"
+        if "较少" in str(val): return "color: gray; background-color: #f3f4f6;"
+        if "累积" in str(val): return "color: orange; background-color: #ffedd5;"
         return ""
     
     def cash_flow_color(val):
+        if val is None: return ""
         if val < 0: return "color: red; font-weight: bold;"
         else: return "color: green; font-weight: bold;"
 
+    # 渲染表格
     st.dataframe(
         display_df.style.applymap(color_code, subset=['操作建议'])
         .applymap(cash_flow_color, subset=['当日净现金流 ($)'])
-        .format({"当日净现金流 ($)": "${:,.1f}", "动态积灰度 (%)": "{:.1f}%"}), 
+        .format({
+            "当日净现金流 ($)": "${:,.1f}", 
+            "动态积灰度 (%)": "{:.1f}%",
+            "日辐射量 (MJ/m²)": "{:.1f}",
+            "等效日照 (h)": "{:.1f}"
+        }), 
         use_container_width=True, 
         hide_index=True, 
         height=400
@@ -371,21 +397,36 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
     
     csv = display_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("📥 下载季度计划 CSV", data=csv, file_name='quarterly_plan.csv', mime='text/csv')
+    
     st.divider()
     
-    st.subheader("📈 全年积灰趋势、发电收益与季度固定清洗窗口")
+    # --- 第四部分：图表 (放在最底部，即使有悬浮层也不会遮挡上面的控件了) ---
+    st.subheader("📈 全年辐射、积灰趋势与发电收益")
     
     fig = go.Figure()
     
+    # 添加辐射量曲线
+    fig.add_trace(go.Scatter(
+        x=df_daily['日期'], 
+        y=df_daily['日辐射量 (MJ/m²)'],
+        mode='lines', 
+        name='日辐射量 (MJ/m²)',
+        line=dict(color='orange', width=1, dash='dot'),
+        opacity=0.6,
+        yaxis='y1'
+    ))
+
+    # 添加收益柱状图
     fig.add_trace(go.Bar(
         x=df_daily['日期'], 
         y=df_daily['当日净现金流 ($)'],
         name='当日净现金流 ($)',
         marker_color=df_daily['当日净现金流 ($)'].apply(lambda x: 'green' if x > 0 else 'red'),
-        opacity=0.6,
+        opacity=0.8,
         yaxis='y2' 
     ))
 
+    # 添加积灰曲线
     fig.add_trace(go.Scatter(
         x=df_daily['日期'], y=df_daily['动态积灰度 (%)'],
         mode='lines', name='动态积灰度 (%)',
@@ -412,7 +453,7 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
         legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
         xaxis=dict(tickformat="%m-%d", tickangle=45, nticks=36),
         yaxis=dict(
-            title="积灰度 (%)", 
+            title="积灰度 (%) / 辐射 (MJ/m²)", 
             title_font=dict(color="purple", size=14),
             tickfont=dict(color="purple"),
             side='left'
@@ -424,16 +465,19 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
             overlaying='y', 
             side='right'
         ),
+        # 【关键修改 2】强制图表模式栏固定在图表内部，减少对外部元素的干扰
+        modebar_add=['v1hovermode', 'toggleSpikeLines'],
+        modebar_remove=['toImage', 'pan2d', 'select2d', 'lasso2d', 'autoScale2d', 'resetScale2d', 'zoomIn2d', 'zoomOut2d', 'orbitRotation', 'tableRotation']
     )
         
     st.plotly_chart(fig, use_container_width=True)
     
     st.caption("""
-    **图表解读与国际标准说明**:
-    - **紫色曲线**: 全年积灰自然累积趋势。
+    **图表解读与数据源说明**:
+    - **橙色虚线**: 每日太阳辐射量 (来源: Open-Meteo 历史实测数据)。**辐射越低，代表阴雨天，发电收入越少。**
+    - **紫色实线**: 积灰度趋势。
     - **绿/红柱状图**: 当日实际净现金流。
-    - **⚠️ 清洗日收入下降说明**: 根据 IEC 61724 及运维规范，清洗过程中因组件物理遮挡（Shading）及安全停机，**正在清洗的区域无法发电**。
-      本模型已按 **清洗比例** 计算清洗日收益，因此清洗日的净现金流会显著低于平时。
+    - **逻辑修正**: 现在的收入计算已关联真实天气。**雨天不仅没有清洗风险，本身发电量也极低**，这解释了为什么某些日子收入会突然下降。
     """)
 
 elif 'data_loaded' not in st.session_state:
@@ -441,4 +485,4 @@ elif 'data_loaded' not in st.session_state:
         st.info("👈 请点击左上角的 **“生成季度固定清洗计划”** 按钮开始分析。")
 
 st.markdown("---")
-st.caption("Quarterly Fixed Schedule Planner v17.0 (Fixed IndexError & Capacity Validation)")
+st.caption("Quarterly Fixed Schedule Planner v18.0 (Real Solar Radiation Integration)")

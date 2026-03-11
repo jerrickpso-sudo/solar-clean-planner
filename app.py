@@ -7,7 +7,7 @@ import datetime
 
 # ================= 页面配置 =================
 st.set_page_config(
-    page_title="光伏电站季度固定清洗计划与智能优选 (夜间清洗版)",
+    page_title="光伏电站季度固定清洗计划与智能优选",
     page_icon="🌙",
     layout="wide"
 )
@@ -158,7 +158,7 @@ else:
     1. **固定频次**: 严格执行 **每季度清洗一次**。
     2. **气象驱动**: 基于 **历史实测辐射与降雨数据** 预测未来一年收益。
     3. **零损耗作业**: 清洗在夜间进行，**白天发电无折损**，清洗完成后次日即刻提升效率。
-    4. **智能备选**: 若首选窗口有雨，自动推荐**降雨最少**的备选时段。
+    4. **智能双选**: 若首选窗口有雨，自动提供**“积灰峰值”**作为备选方案。
     """)
 
 # ================= ✅ 核心修改：获取包含辐射量的天气数据 =================
@@ -233,7 +233,7 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
         current_dust = min(current_dust, MAX_DUST_CAPACITY)
         dust_series_natural.append(current_dust)
 
-    # --- 第二步：确定人工清洗窗口 (优先手动，其次自动 + 备选) ---
+    # --- 第二步：确定人工清洗窗口 (优先手动，其次自动 + 智能备选) ---
     for q_idx in range(4):
         q_num = q_idx + 1
         q_start_range, q_end_range = q_ranges[q_idx]
@@ -254,7 +254,7 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
                     'start_date': dates[s_idx], 'end_date': dates[e_idx],
                     'avg_dust': avg_dust, 'cost': total_cleaning_cost, 
                     'is_perfect': True, 'is_manual': True,
-                    'alternative_window': None # 手动模式不需要备选
+                    'alternative_window': None
                 })
                 for k in range(s_idx, e_idx + 1): chosen_days.add(k)
             except ValueError:
@@ -291,37 +291,54 @@ def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust
                     best_start = start
                     best_avg_dust = avg_dust
         
-        # 2. 如果找不到完美窗口，寻找“最佳妥协”窗口 (降雨最少)
+        # 2. 如果找不到完美窗口，确定主计划（降雨最少）和备选计划（积灰最高）
         alternative_window = None
         if best_start == -1: 
+            # --- 主计划策略：找降雨总量最少的 (保守策略) ---
             min_rain_sum = 99999
-            best_alt_start = -1
-            best_alt_dust = 0
+            best_main_start = -1
+            best_main_dust = 0
             
             for start in range(q_start_range, q_end_range - clean_duration + 1):
                 r_sum = sum(rain[k] for k in range(start, start+clean_duration))
                 avg_d = sum(dust_series_natural[k] for k in range(start, start+clean_duration))/clean_duration
                 
-                # 评分：降雨越少越好，积灰越高越好
-                # 这里简单用降雨量作为主要排序依据
                 if r_sum < min_rain_sum:
                     min_rain_sum = r_sum
-                    best_alt_start = start
-                    best_alt_dust = avg_d
+                    best_main_start = start
+                    best_main_dust = avg_d
             
-            if best_alt_start != -1:
+            # --- 备选计划策略：找积灰度最高的 (激进策略：即使雨多一点，也要趁脏赶紧洗) ---
+            max_dust_val = -1
+            best_alt_start = -1
+            best_alt_rain = 0
+            
+            for start in range(q_start_range, q_end_range - clean_duration + 1):
+                avg_d = sum(dust_series_natural[k] for k in range(start, start+clean_duration))/clean_duration
+                r_sum = sum(rain[k] for k in range(start, start+clean_duration))
+                
+                if avg_d > max_dust_val:
+                    max_dust_val = avg_d
+                    best_alt_start = start
+                    best_alt_rain = r_sum
+            
+            # 🆕 关键逻辑：只有当“积灰最高”的窗口和“降雨最少”的窗口**不一样**时，才显示备选
+            # 避免推荐重复信息
+            if best_alt_start != best_main_start and best_alt_start != -1:
                 alternative_window = {
                     'start_idx': best_alt_start,
                     'end_idx': best_alt_start + clean_duration - 1,
                     'start_date': dates[best_alt_start],
                     'end_date': dates[best_alt_start + clean_duration - 1],
-                    'avg_dust': best_alt_dust,
-                    'total_rain': min_rain_sum,
-                    'reason': f"该时段为季度内降雨总量最少 ({min_rain_sum:.1f}mm) 且积灰较高 ({best_alt_dust:.1f}%) 的窗口"
+                    'avg_dust': max_dust_val,
+                    'total_rain': best_alt_rain,
+                    'reason': f"该时段积灰度达季度峰值 ({max_dust_val:.1f}%)，虽降雨略多 ({best_alt_rain:.1f}mm)，但可避免重度积灰导致的发电损失。"
                 }
-                # 将最佳妥协方案作为主计划，但标记为不完美
-                best_start = best_alt_start
-                best_avg_dust = best_alt_dust
+            
+            # 将“降雨最少”的设为当前主计划
+            if best_main_start != -1:
+                best_start = best_main_start
+                best_avg_dust = best_main_dust
             else:
                 continue
         else:
@@ -461,12 +478,12 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
                     st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
                     st.error(f"**高风险窗口 (夜)**\n{detail}", icon="⚠️")
                     
-                    # 🆕 显示备选窗口建议
+                    # 🆕 显示备选窗口建议 (仅当备选与主计划不同时)
                     alt = w.get('alternative_window')
                     if alt:
                         alt_date_range = f"{alt['start_date'][5:]} ~ {alt['end_date'][5:]}"
                         st.markdown(f"""
-                        <div style="background-color: #f0f2f6; padding: 10px; border-radius: 5px; margin-top: 5px; border-left: 4px solid #ffa500;">
+                        <div style="background-color: #fff8e1; padding: 10px; border-radius: 5px; margin-top: 5px; border-left: 4px solid #ff9800;">
                         <small>💡 **建议备选窗口**: {alt_date_range}</small><br>
                         <small style="color: #555;">{alt['reason']}</small>
                         </div>
@@ -597,7 +614,7 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
             annotation_position="top right"
         )
         
-        # 🆕 绘制备选窗口 (虚线框)
+        # 🆕 绘制备选窗口 (橙色虚线框)
         alt = w.get('alternative_window')
         if alt:
             fig.add_vrect(
@@ -608,7 +625,7 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
                 line_width=2,
                 line_dash="dash",
                 line_color="orange",
-                annotation_text=f"Q{w['q']} 备选建议",
+                annotation_text=f"Q{w['q']} 备选 (高积灰)",
                 annotation_position="bottom left",
                 annotation_font_size=10,
                 annotation_font_color="orange"
@@ -668,8 +685,10 @@ if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
 
         #### 5. ⚠️ 高风险清洗期与备选方案
         - **高风险定义**: 在季度内无法找到连续 N 天（N=工期）完全无大雨（≥5.0mm）的时段。
-        - **备选方案逻辑**: 系统会自动扫描该季度所有可能的窗口，计算**降雨总量最少**且**平均积灰度最高**的时段作为“备选建议”。
-        - **建议**: 当主计划显示为高风险时，请优先参考橙色虚线框标注的**备选窗口**，或结合短期天气预报进行人工调整。
+        - **主计划策略 (保守)**: 选择**降雨总量最少**的窗口，以最大化清洗效果保留率。
+        - **备选方案策略 (激进)**: 选择**积灰度最高**的窗口。
+          - *适用场景*: 当积灰导致的发电损失预期 > 降雨导致的清洗效果折损时。
+          - *显示逻辑*: 仅当备选窗口与主计划窗口**日期不同**时显示，避免重复建议。
         """)
     
     st.caption("光伏电站季度固定清洗计划系统 v1.0")

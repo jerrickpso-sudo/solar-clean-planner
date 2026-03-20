@@ -519,89 +519,120 @@ if run:
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # 📈 图表：三轴分离 (最终稳定版 - 不使用 position)
+    # 📈 图表：严格按照您的要求修改
     st.subheader("策略可视化")
-    fig = go.Figure()
     
-    # 1. 辐射量 (左轴 y1)
-    fig.add_trace(go.Scatter(
-        x=df['date'], y=df['radiation_kwh'], 
+    # --- 图一：辐射量 & 净现金流 (重新编辑，确保坐标轴格式正确) ---
+    fig1 = go.Figure()
+    
+    # 1. 辐射量 (左轴)
+    fig1.add_trace(go.Scatter(
+        x=df['date'], 
+        y=df['radiation_kwh'], 
         name='辐射量 (kWh/m²)', 
         line=dict(color='#ff9500', width=3),
         yaxis='y1'
     ))
     
-    # 2. 积灰度 (右轴 y2 - 内侧)
-    fig.add_trace(go.Scatter(
-        x=df['date'], y=df['dust'], 
-        name='积灰度 (%)', 
-        line=dict(color='#ff3b30', width=3),
+    # 2. 净现金流 (右轴)
+    fig1.add_trace(go.Bar(
+        x=df['date'], 
+        y=df['net'], 
+        name='净现金流 (R$)', 
+        marker_color=df['net'].apply(lambda x: '#34c759' if x>0 else '#ff3b30'), 
+        opacity=0.5,
         yaxis='y2'
     ))
     
-    # 3. 净现金流 (右轴 y3 - 外侧)
-    fig.add_trace(go.Bar(
-        x=df['date'], y=df['net'], 
-        name='净现金流 (R$)', 
-        marker_color=df['net'].apply(lambda x: '#34c759' if x>0 else '#ff3b30'), 
-        opacity=0.4,
-        yaxis='y3'
-    ))
-    
-    # 添加清洗窗口背景
+    # 清洗背景
     for w in wins:
-        fig.add_vrect(x0=df['date'].iloc[w['start']], x1=df['date'].iloc[w['end']], fillcolor="#0071e3", opacity=0.1, line_width=0)
+        fig1.add_vrect(x0=df['date'].iloc[w['start']], x1=df['date'].iloc[w['end']], fillcolor="#0071e3", opacity=0.1, line_width=0)
     
-    # 🔧 关键修复：通过 domain 和 margin 分离坐标轴
-    fig.update_layout(
-        height=550,
+    # 关键：重新定义布局，确保双轴彻底分离
+    fig1.update_layout(
+        height=400,
         hovermode='x unified',
-        legend=dict(orientation="h", y=1.02, x=0.5, xanchor='center', font=dict(size=11)),
-        
-        # 左轴 (辐射)
+        legend=dict(orientation="h", y=1.05, x=0.5, xanchor='center', font=dict(size=11)),
+        # 左轴配置
         yaxis=dict(
             title="辐射量 (kWh/m²)", 
             side='left', 
             gridcolor='#f0f0f0', 
-            range=[0, 8], 
             tickfont=dict(color="#ff9500", size=11),
-            title_standoff=10
+            title_font=dict(color="#ff9500", size=12),
+            showgrid=True,
+            zeroline=False
         ),
-        
-        # 右轴 1 (积灰 - 内侧)
+        # 右轴配置 - 关键修改：独立域，右侧，无网格
         yaxis2=dict(
-            title="积灰度 (%)", 
-            overlaying='y', 
-            side='right', 
-            showgrid=False, 
-            range=[0, 15], 
-            tickfont=dict(color="#ff3b30", size=11),
-            anchor='free',
-            domain=[0, 1],
-            # 不再使用 position，让 Plotly 自动放置在右侧边缘
-        ),
-        
-        # 右轴 2 (现金流 - 外侧)
-        yaxis3=dict(
             title="净现金流 (R$)", 
             overlaying='y', 
             side='right', 
-            showgrid=False, 
             tickfont=dict(color="#34c759", size=11),
-            anchor='free',
-            domain=[0, 1],
-            # 不再使用 position
+            title_font=dict(color="#34c759", size=12),
+            showgrid=False, # 右侧不显示网格，避免混乱
+            zeroline=False,
+            anchor='x' # 确保锚定在X轴上
         ),
-        
+        xaxis=dict(
+            showgrid=False,
+            tickfont=dict(size=10)
+        ),
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
-        # 大幅增加右侧边距，为两个轴留出空间
-        margin=dict(l=60, r=120, t=60, b=40), 
+        margin=dict(l=70, r=70, t=50, b=40), 
         font=dict(family="Noto Sans SC", size=11),
         barmode='overlay'
     )
-
-    st.plotly_chart(fig, use_container_width=True)
+    
+    st.plotly_chart(fig1, use_container_width=True, key="chart1")
+    
+    # --- 图二：积灰度 (纵轴间隔调整为0.5) ---
+    fig2 = go.Figure()
+    
+    fig2.add_trace(go.Scatter(
+        x=df['date'], 
+        y=df['dust'], 
+        name='积灰度 (%)', 
+        line=dict(color='#d70000', width=4), 
+        mode='lines+markers', 
+        marker=dict(size=6, color='#d70000')
+    ))
+    
+    for w in wins:
+        fig2.add_vrect(x0=df['date'].iloc[w['start']], x1=df['date'].iloc[w['end']], fillcolor="#0071e3", opacity=0.1, line_width=0)
+    
+    # 计算动态范围，但重点是设置 tickinterval
+    max_dust = df['dust'].max()
+    y_max = max(5, math.ceil(max_dust * 1.2))
+    
+    fig2.update_layout(
+        height=300, # 稍微增加高度以容纳更多刻度
+        hovermode='x unified',
+        showlegend=False, 
+        yaxis=dict(
+            title="积灰度 (%)", 
+            side='left', 
+            gridcolor='#f0f0f0', 
+            range=[0, y_max],
+            tickfont=dict(color="#d70000", size=11), 
+            title_font=dict(color="#d70000", size=12),
+            # 关键修改：强制刻度间隔为 0.5
+            dtick=0.5, 
+            showgrid=True,
+            zeroline=False
+        ),
+        xaxis=dict(
+            showgrid=False,
+            tickfont=dict(size=10)
+        ),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=70, r=20, t=10, b=40), 
+        font=dict(family="Noto Sans SC", size=11),
+    )
+    
+    st.plotly_chart(fig2, use_container_width=True, key="chart2")
     
     # 表格
     st.subheader("执行计划")

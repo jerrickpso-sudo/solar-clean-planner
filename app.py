@@ -4,708 +4,636 @@ import pandas as pd
 import plotly.graph_objects as go
 import math
 import datetime
+from typing import Dict, List
+import numpy as np
 
 # ================= 页面配置 =================
 st.set_page_config(
-    page_title="光伏电站季度固定清洗计划与智能优选",
-    page_icon="🌙",
-    layout="wide"
+    page_title="巴西光伏运维 | 智能决策系统",
+    page_icon="🇧",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ================= ⭐ 行业常数与物理模型 ⭐
-ROBOT_EFFICIENCY_MW_PER_DAY = 0.8
-PANEL_POWER_W = 700
-WATER_CONSUMPTION_PER_MW = 10.0
-ENERGY_CONSUMPTION_PER_MW = 5.0
-DUST_ACCUMULATION_RATE = 0.4
-MAX_DUST_CAPACITY = 15.0
-MAX_QUARTERLY_DAYS = 92 
+# ================= 🎨 CSS 样式 =================
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
 
-# ================= 核心数据库 =================
+    html, body, [class*="css"] {
+        font-family: 'Noto Sans SC', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background-color: #F5F5F7;
+        color: #1D1D1F;
+    }
+    
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stAppHeader {display: none;}
+
+    .stSidebar {
+        background-color: rgba(255, 255, 255, 0.9);
+        backdrop-filter: blur(20px);
+        border-right: 1px solid rgba(0,0,0,0.05);
+        padding-top: 2rem;
+    }
+    .stSidebar h2 { 
+        font-size: 0.75rem; 
+        text-transform: uppercase; 
+        letter-spacing: 0.05em; 
+        color: #86868b; 
+        font-weight: 700; 
+        margin-bottom: 0.5rem; 
+        margin-top: 1rem;
+    }
+    
+    .input-caption {
+        font-size: 0.75rem;
+        color: #6e6e73;
+        margin-top: -10px;
+        margin-bottom: 10px;
+        line-height: 1.4;
+    }
+    
+    .stButton > button {
+        background-color: #FFFFFF;
+        color: #0071e3;
+        border: 1px solid #0071e3;
+        border-radius: 980px;
+        padding: 8px 16px;
+        font-weight: 600;
+        font-size: 0.85rem;
+        transition: all 0.2s ease;
+        width: 100%;
+    }
+    .stButton > button:hover {
+        background-color: #0071e3;
+        color: white;
+        transform: scale(1.02);
+    }
+    
+    .metric-container {
+        background: #FFFFFF;
+        border-radius: 18px;
+        padding: 20px;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+        border: 1px solid rgba(0,0,0,0.02);
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        transition: transform 0.2s;
+    }
+    .metric-container:hover { transform: translateY(-3px); }
+    .metric-label { font-size: 0.75rem; text-transform: uppercase; color: #86868b; font-weight: 700; margin-bottom: 6px; }
+    .metric-value { font-size: 1.8rem; font-weight: 700; color: #1D1D1F; line-height: 1.1; }
+    .metric-sub { font-size: 0.8rem; color: #34c759; font-weight: 500; margin-top: 4px; }
+    .metric-sub.neutral { color: #86868b; }
+
+    .weather-card {
+        background: #FFFFFF;
+        border-radius: 16px;
+        padding: 14px;
+        text-align: center;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.03);
+        border: 1px solid rgba(0,0,0,0.02);
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+    .w-date { font-size: 0.7rem; color: #86868b; font-weight: 700; text-transform: uppercase; }
+    .w-icon { font-size: 2.2rem; margin: 6px 0; }
+    .w-temp { font-size: 1rem; font-weight: 600; }
+    .w-desc { font-size: 0.7rem; color: #86868b; margin: 2px 0 6px; }
+    .w-stats { font-size: 0.65rem; background: #F5F5F7; padding: 3px 6px; border-radius: 6px; width: 100%; }
+    .risk-badge { font-size: 0.6rem; font-weight: 700; padding: 2px 5px; border-radius: 3px; margin-top: 5px; text-transform: uppercase; }
+    .risk-wind { background: #ffe5e5; color: #ff3b30; }
+    .risk-mud { background: #fff4e5; color: #ff9500; }
+
+    .fade-in-up { animation: fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; opacity: 0; transform: translateY(15px); }
+    @keyframes fadeInUp { to { opacity: 1; transform: translateY(0); } }
+
+    div[data-testid="stDataFrame"] { border-radius: 12px; overflow: hidden; border: 1px solid #e5e5e5; }
+</style>
+""", unsafe_allow_html=True)
+
+# ================= ⭐ 核心常数 =================
+DEFAULT_PANEL_POWER_W = 700
+MIN_PANEL_POWER_W = 300
+MAX_PANEL_POWER_W = 900
+WATER_CONSUMPTION_PER_PANEL = 0.015
+ENERGY_CONSUMPTION_PER_PANEL = 0.008
+ROBOT_EFFICIENCY_PANELS_PER_HOUR = 50
+ROBOT_DAILY_WORK_HOURS = 10.0
+ROBOT_AVAILABILITY_RATE = 0.95
+DUST_ACCUMULATION_RATE_BASE = 0.4
+MAX_DUST_CAPACITY = 15.0
+SOILING_NON_LINEAR_FACTOR = 1.2
+HOTSPOT_THRESHOLD = 8.0
+HEAVY_RAIN_THRESHOLD = 5.0
+LIGHT_RAIN_THRESHOLD = 1.0
+MUD_RISK_HUMIDITY = 85.0
+WIND_SAFETY_LIMIT = 10.0
+CARBON_FACTOR = 0.58
+
+# ================= 🗄️ 数据库 =================
 STATION_DB = {
     "请选择电站...": {},
-    "AUT (Autazes)": {"lat": -3.60, "lon": -59.12, "sell_price": 0.35, "robot_elec_price": 0.25, "water_price": 2.0, "pollution_index": 0.6, "robot_efficiency": 0.90},
-    "NOD (Nova Olinda)": {"lat": -3.88, "lon": -59.07, "sell_price": 0.38, "robot_elec_price": 0.28, "water_price": 2.2, "pollution_index": 0.7, "robot_efficiency": 0.88},
-    "BBA (Borba)": {"lat": -4.40, "lon": -59.63, "sell_price": 0.32, "robot_elec_price": 0.22, "water_price": 1.8, "pollution_index": 0.5, "robot_efficiency": 0.92},
-    "HMT (Humaita)": {"lat": -7.48, "lon": -63.02, "sell_price": 0.40, "robot_elec_price": 0.35, "water_price": 2.5, "pollution_index": 0.8, "robot_efficiency": 0.85},
-    "SGC (Sao Gabriel)": {"lat": -0.15, "lon": -67.03, "sell_price": 0.36, "robot_elec_price": 0.26, "water_price": 2.1, "pollution_index": 0.65, "robot_efficiency": 0.89}
+    "AUT (Autazes)": {"lat": -3.60, "lon": -59.12, "sell_price": 0.35, "robot_elec_price": 0.25, "water_price": 2.0},
+    "NOD (Nova Olinda)": {"lat": -3.88, "lon": -59.07, "sell_price": 0.38, "robot_elec_price": 0.28, "water_price": 2.2},
+    "BBA (Borba)": {"lat": -4.40, "lon": -59.63, "sell_price": 0.32, "robot_elec_price": 0.22, "water_price": 1.8},
+    "HMT (Humaita)": {"lat": -7.48, "lon": -63.02, "sell_price": 0.40, "robot_elec_price": 0.35, "water_price": 2.5},
+    "SGC (Sao Gabriel)": {"lat": -0.15, "lon": -67.03, "sell_price": 0.36, "robot_elec_price": 0.26, "water_price": 2.1}
 }
 
-# ================= 侧边栏 =================
-st.sidebar.image("https://img.icons8.com/color/96/solar-panel.png", width=80)
-st.sidebar.header("🌙 季度固定周期规划 (夜间清洗)")
+# ================= 🛠️ 工具函数 =================
+def get_weather_icon(code: int) -> str:
+    icons = {0: "☀️", 1: "🌤️", 2: "⛅", 3: "☁️", 45: "🌫️", 51: "🌦️", 53: "🌦️", 55: "🌧️", 
+             61: "🌧️", 63: "🌧️", 65: "⛈️", 80: "🌦️", 81: "🌧️", 82: "⛈️", 95: "⚡", 96: "⚡", 99: "⚡"}
+    return icons.get(code, "❓")
 
-selected_station = st.sidebar.selectbox("📍 选择目标电站", list(STATION_DB.keys()), index=0)
+def get_weather_desc(code: int, humidity: float, wind: float) -> str:
+    base = {0: "晴朗", 1: "大部晴朗", 2: "多云", 3: "阴天", 45: "雾", 51: "小雨", 
+            53: "雨", 55: "雨", 61: "雨", 63: "雨", 65: "大雨", 80: "阵雨", 
+            81: "雨", 82: "风暴", 95: "雷暴", 96: "雷暴", 99: "雷暴"}.get(code, "未知")
+    risks = []
+    if code in [95, 96, 99]: risks.append("⚡")
+    if wind > WIND_SAFETY_LIMIT: risks.append(f"💨{wind:.0f}")
+    if humidity > MUD_RISK_HUMIDITY and code in [2, 3]: risks.append("💧")
+    return f"{base} ({' '.join(risks)})" if risks else base
 
-if 'last_params' not in st.session_state:
-    st.session_state.last_params = {}
-
-current_params = {
-    'station': selected_station,
-    'capacity': 0,
-    'robots': 0,
-    'dust_rate': 0,
-    'manual_dates': {} 
-}
-
-config_valid = True
-
-if selected_station != "请选择电站...":
-    data = STATION_DB[selected_station]
-    st.sidebar.subheader("⚙️ 电站规模与配置")
-    capacity_mw = st.sidebar.number_input("⚡ 装机容量 (MW)", value=23.35, min_value=0.1, step=0.1)
-    total_panels = int((capacity_mw * 1_000_000) / PANEL_POWER_W)
-    st.sidebar.success(f"**🔢 太阳能板数量**: {total_panels:,} 块")
-    
-    robot_count = st.sidebar.number_input("🚜 可用机器人数量 (台)", value=5, min_value=1, step=1)
-    daily_capacity = robot_count * ROBOT_EFFICIENCY_MW_PER_DAY
-    days_to_clean_all = math.ceil(capacity_mw / daily_capacity) if daily_capacity > 0 else 999
-    
-    if days_to_clean_all > MAX_QUARTERLY_DAYS:
-        config_valid = False
-        st.sidebar.error(f"""
-        ⚠️ **配置不可行！**
-        当前工期：**{days_to_clean_all} 天** (超过季度上限 {MAX_QUARTERLY_DAYS} 天)
-        **建议**: 增加机器人至 **{math.ceil(capacity_mw / (MAX_QUARTERLY_DAYS * ROBOT_EFFICIENCY_MW_PER_DAY))} 台** 以上。
-        """)
-    else:
-        st.sidebar.info(f"💡 **清洗能力**: {daily_capacity:.1f} MW/天\n**单次全站工期**: **{days_to_clean_all} 天**")
-        st.sidebar.success("**🌙 夜间清洗模式**: 清洗期间**无发电损失**，次日即可享受洁净增益。")
-
-    st.sidebar.subheader("⚖️ 积灰模型参数")
-    poll_idx = float(data['pollution_index'])
-    effective_dust_rate = st.sidebar.slider("🌫️ 日均积灰速率 (%/天)", 0.1, 1.0, DUST_ACCUMULATION_RATE * poll_idx, 0.1)
-    
-    st.sidebar.subheader("💵 关键经济参数")
-    sell_price = st.sidebar.number_input("☀️ 太阳能产电收益 (元/kWh)", value=float(data['sell_price']), step=0.01, format="%.2f")
-    robot_elec_price = st.sidebar.number_input("🔌 清洗用电单价 (元/kWh)", value=float(data['robot_elec_price']), step=0.01, format="%.2f")
-    water_price = st.sidebar.number_input("💧 清洗用水单价 (元/吨)", value=float(data['water_price']), step=0.1, format="%.1f")
-    
-    robot_eff = float(data['robot_efficiency'])
-    LATITUDE = float(data['lat'])
-    LONGITUDE = float(data['lon'])
-    
-    current_params['capacity'] = capacity_mw
-    current_params['robots'] = robot_count
-    current_params['dust_rate'] = effective_dust_rate
-    
-    # ================= ✅ 手动清洗时间输入窗口 =================
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🛠️ 实际执行时间修正")
-    st.sidebar.caption("留空则使用系统推荐，填入后强制覆盖。")
-    
-    manual_dates = {}
-    today = datetime.date.today()
-    
-    for q in range(1, 5):
-        with st.sidebar.expander(f"🗓️ Q{q} 实际执行时间", expanded=False):
-            default_start = today + datetime.timedelta(days=(q-1)*90)
-            default_end = default_start + datetime.timedelta(days=days_to_clean_all-1)
-            
-            m_start = st.date_input(f"Q{q} 开始日期", value=None, key=f"m_start_q{q}", help="手动输入实际开始清洗的日期")
-            m_end = st.date_input(f"Q{q} 结束日期", value=None, key=f"m_end_q{q}", help="手动输入实际完成清洗的日期")
-            
-            if m_start:
-                if not m_end:
-                    m_end = m_start + datetime.timedelta(days=days_to_clean_all-1)
-                    st.info(f"自动推算结束日期: {m_end}")
-                
-                if m_end < m_start:
-                    st.error("结束日期不能早于开始日期！")
-                    config_valid = False
-                elif (m_end - m_start).days + 1 < days_to_clean_all:
-                    st.warning(f"⚠️ 工期过短！理论需 {days_to_clean_all} 天，当前仅 {(m_end - m_start).days + 1} 天。可能导致清洗不彻底。")
-                
-                manual_dates[q] = {
-                    "start": m_start,
-                    "end": m_end,
-                    "is_manual": True
-                }
-            else:
-                manual_dates[q] = {"is_manual": False}
-    
-    current_params['manual_dates'] = manual_dates
-
-else:
-    st.stop()
-
-params_changed = False
-if st.session_state.last_params != current_params:
-    params_changed = True
-    st.session_state.last_params = current_params.copy()
-    keys_to_clear = ['data_loaded', 'df_daily', 'rec_windows', 'filter_option']
-    for k in keys_to_clear:
-        if k in st.session_state:
-            del st.session_state[k]
-
-st.title(f"🌙 {selected_station} - 季度固定清洗计划 (夜间作业)")
-
-if not config_valid:
-    st.error(f"""
-    ### 🛑 无法生成计划：配置或日期输入有误
-    请返回左侧侧边栏调整参数或日期。
-    """)
-    st.stop()
-
-st.markdown(f"**容量**: {capacity_mw} MW | **机器人**: {robot_count} 台 | **单次工期**: {days_to_clean_all} 天")
-
-has_manual_input = any(v['is_manual'] for v in current_params['manual_dates'].values())
-if has_manual_input:
-    st.info("🔧 **混合模式激活**: 部分季度已手动指定清洗时间，系统将基于实际执行时间重新计算积灰与收益。")
-else:
-    st.info(f"""
-    **🏢 公司合规策略 (夜间清洗版)**:
-    1. **固定频次**: 严格执行 **每季度清洗一次**。
-    2. **气象驱动**: 基于 **历史实测辐射与降雨数据** 预测未来一年收益。
-    3. **零损耗作业**: 清洗在夜间进行，**白天发电无折损**，清洗完成后次日即刻提升效率。
-    4. **智能双选**: 若首选窗口有雨，自动提供**“积灰峰值”**作为备选方案。
-    """)
-
-# ================= ✅ 核心修改：获取包含辐射量的天气数据 =================
-@st.cache_data(ttl=3600)
-def get_real_historical_climate(lat, lon):
-    end_date = datetime.datetime.now()
-    start_date = end_date - datetime.timedelta(days=365)
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": lat, "longitude": lon,
-        "start_date": start_date.strftime("%Y-%m-%d"),
-        "end_date": end_date.strftime("%Y-%m-%d"),
-        "daily": ["precipitation_sum", "wind_speed_10m_max", "shortwave_radiation_sum"],
-        "timezone": "America/Manaus"
-    }
+def fmt_date_short(s):
     try:
-        with st.spinner("正在下载过去365天实测辐射与降雨数据..."):
-            response = requests.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-            
-            if 'daily' not in data or 'shortwave_radiation_sum' not in data['daily']:
-                return None
-            
-            real_rain = data['daily']['precipitation_sum']
-            real_wind = data['daily']['wind_speed_10m_max']
-            real_radiation = data['daily']['shortwave_radiation_sum']
-            
-            if len(real_rain) < 300: return None
-            
-            future_start = datetime.datetime.now() + datetime.timedelta(days=1)
-            future_dates = [(future_start + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(len(real_rain))]
-            
-            return {
-                "time": future_dates, 
-                "precipitation_sum": real_rain, 
-                "wind_speed_10m_max": real_wind,
-                "shortwave_radiation_sum": real_radiation
-            }
-    except Exception as e:
-        st.error(f"天气数据获取失败: {e}")
-        return None
+        dt = datetime.datetime.strptime(s, "%Y-%m-%d")
+        return f"{dt.month}/{dt.day}"
+    except: return s
 
-def analyze_quarterly_plan(weather_data, capacity, p_sell, p_elec, p_water, dust_rate, r_eff, clean_duration, manual_overrides):
-    dates = weather_data['time']
-    rain = weather_data['precipitation_sum']
-    radiation = weather_data['shortwave_radiation_sum']
-    
-    HEAVY_RAIN_THRESHOLD = 5.0
-    LIGHT_RAIN_THRESHOLD = 1.0
-    
-    total_cleaning_cost = (capacity * WATER_CONSUMPTION_PER_MW) * p_water + (capacity * ENERGY_CONSUMPTION_PER_MW) * p_elec
-    
-    date_objs = [datetime.datetime.strptime(d, "%Y-%m-%d") for d in dates]
-    step = len(dates) // 4
-    q_ranges = [(0, step-1), (step, 2*step-1), (2*step, 3*step-1), (3*step, len(dates)-1)]
-    
-    recommended_windows = []
-    chosen_days = set()
-    
-    # --- 第一步：预计算全年的自然积灰序列 ---
-    dust_series_natural = []
-    current_dust = 0.0
-    for i in range(len(dates)):
-        r = rain[i]
-        if r >= HEAVY_RAIN_THRESHOLD:
-            current_dust = 0.0
-        elif r >= LIGHT_RAIN_THRESHOLD:
-            current_dust *= 0.5
-        else:
-            current_dust += dust_rate
-        current_dust = min(current_dust, MAX_DUST_CAPACITY)
-        dust_series_natural.append(current_dust)
+def fmt_date_full(s):
+    try:
+        dt = datetime.datetime.strptime(s, "%Y-%m-%d")
+        return f"{dt.year}.{dt.month:02d}.{dt.day:02d}"
+    except: return s
 
-    # --- 第二步：确定人工清洗窗口 (优先手动，其次自动 + 智能备选) ---
-    for q_idx in range(4):
-        q_num = q_idx + 1
-        q_start_range, q_end_range = q_ranges[q_idx]
-        
-        manual_info = manual_overrides.get(q_num, {})
-        
-        if manual_info.get('is_manual'):
-            m_start_date = manual_info['start']
-            m_end_date = manual_info['end']
-            try:
-                s_idx = dates.index(m_start_date.strftime("%Y-%m-%d"))
-                e_idx = dates.index(m_end_date.strftime("%Y-%m-%d"))
-                actual_duration = e_idx - s_idx + 1
-                avg_dust = sum(dust_series_natural[k] for k in range(s_idx, e_idx+1)) / actual_duration
-                
-                recommended_windows.append({
-                    'q': q_num, 'start_idx': s_idx, 'end_idx': e_idx,
-                    'start_date': dates[s_idx], 'end_date': dates[e_idx],
-                    'avg_dust': avg_dust, 'cost': total_cleaning_cost, 
-                    'is_perfect': True, 'is_manual': True,
-                    'alternative_window': None
-                })
-                for k in range(s_idx, e_idx + 1): chosen_days.add(k)
-            except ValueError:
-                st.warning(f"⚠️ Q{q_num} 的手动日期超出天气数据范围，该季度将回退到自动推荐。")
-            continue 
+def validate_inputs(count, power):
+    cap = (count * power) / 1_000_000
+    valid = True
+    err = ""
+    if power < MIN_PANEL_POWER_W or power > MAX_PANEL_POWER_W:
+        valid = False
+        err = f"功率超出范围 ({MIN_PANEL_POWER_W}-{MAX_PANEL_POWER_W}W)"
+    return valid, err, round(cap, 2)
 
-        # 自动推荐逻辑
-        best_start = -1
-        best_score = -1
-        best_avg_dust = 0
-        is_perfect = False
+# ================= 🌐 数据获取 =================
+@st.cache_data(ttl=1800)
+def fetch_weather(lat, lon, days=14):
+    try:
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat, "longitude": lon,
+            "hourly": "weathercode,temperature_2m,relativehumidity_2m,windspeed_10m,rain",
+            "daily": "shortwave_radiation_sum,precipitation_sum,windspeed_10m_max,temperature_2m_max",
+            "timezone": "auto", "forecast_days": days
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
         
-        available_days = q_end_range - q_start_range + 1
-        if available_days < clean_duration:
-            continue
+        h, d = data['hourly'], data['daily']
+        agg = {}
+        for i in range(len(h['time'])):
+            date = h['time'][i].split('T')[0]
+            if date not in agg: agg[date] = {"r":0, "w":0, "h":0, "t":0, "c":[]}
+            agg[date]["r"] += h['rain'][i] or 0
+            agg[date]["w"] = max(agg[date]["w"], h['windspeed_10m'][i] or 0)
+            agg[date]["h"] = max(agg[date]["h"], h['relativehumidity_2m'][i] or 50)
+            agg[date]["t"] = max(agg[date]["t"], h['temperature_2m'][i] or 25)
+            agg[date]["c"].append(h['weathercode'][i] or 0)
             
-        # 1. 尝试寻找完美窗口 (无大雨)
-        for start in range(q_start_range, q_end_range - clean_duration + 1):
-            end = start + clean_duration - 1
-            is_safe = True
-            max_rain = 0
-            for k in range(start, end + 1):
-                if rain[k] > HEAVY_RAIN_THRESHOLD:
-                    is_safe = False
-                    break
-                max_rain = max(max_rain, rain[k])
+        res = []
+        for i in range(len(d['time'])):
+            date = d['time'][i]
+            info = agg.get(date, {})
+            rad_mj = d['shortwave_radiation_sum'][i] or 0
+            rain = d['precipitation_sum'][i] or info.get("r", 0)
+            wind = (d['windspeed_10m_max'][i] or info.get("w", 0)) / 3.6
+            temp = d['temperature_2m_max'][i] or info.get("t", 25)
+            hum = info.get("h", 70)
+            code = max(set(info.get("c", [0])), key=info.get("c", [0]).count)
             
-            if is_safe:
-                is_perfect = True
-                avg_dust = sum(dust_series_natural[k] for k in range(start, end+1)) / clean_duration
-                score = avg_dust * 10 + (10 - max_rain)
-                if score > best_score:
-                    best_score = score
-                    best_start = start
-                    best_avg_dust = avg_dust
-        
-        # 2. 如果找不到完美窗口，确定主计划（降雨最少）和备选计划（积灰最高）
-        alternative_window = None
-        if best_start == -1: 
-            # --- 主计划策略：找降雨总量最少的 (保守策略) ---
-            min_rain_sum = 99999
-            best_main_start = -1
-            best_main_dust = 0
-            
-            for start in range(q_start_range, q_end_range - clean_duration + 1):
-                r_sum = sum(rain[k] for k in range(start, start+clean_duration))
-                avg_d = sum(dust_series_natural[k] for k in range(start, start+clean_duration))/clean_duration
-                
-                if r_sum < min_rain_sum:
-                    min_rain_sum = r_sum
-                    best_main_start = start
-                    best_main_dust = avg_d
-            
-            # --- 备选计划策略：找积灰度最高的 (激进策略：即使雨多一点，也要趁脏赶紧洗) ---
-            max_dust_val = -1
-            best_alt_start = -1
-            best_alt_rain = 0
-            
-            for start in range(q_start_range, q_end_range - clean_duration + 1):
-                avg_d = sum(dust_series_natural[k] for k in range(start, start+clean_duration))/clean_duration
-                r_sum = sum(rain[k] for k in range(start, start+clean_duration))
-                
-                if avg_d > max_dust_val:
-                    max_dust_val = avg_d
-                    best_alt_start = start
-                    best_alt_rain = r_sum
-            
-            # 🆕 关键逻辑：只有当“积灰最高”的窗口和“降雨最少”的窗口**不一样**时，才显示备选
-            # 避免推荐重复信息
-            if best_alt_start != best_main_start and best_alt_start != -1:
-                alternative_window = {
-                    'start_idx': best_alt_start,
-                    'end_idx': best_alt_start + clean_duration - 1,
-                    'start_date': dates[best_alt_start],
-                    'end_date': dates[best_alt_start + clean_duration - 1],
-                    'avg_dust': max_dust_val,
-                    'total_rain': best_alt_rain,
-                    'reason': f"该时段积灰度达季度峰值 ({max_dust_val:.1f}%)，虽降雨略多 ({best_alt_rain:.1f}mm)，但可避免重度积灰导致的发电损失。"
-                }
-            
-            # 将“降雨最少”的设为当前主计划
-            if best_main_start != -1:
-                best_start = best_main_start
-                best_avg_dust = best_main_dust
-            else:
-                continue
-        else:
-            best_avg_dust = best_avg_dust
-            
-        if best_start != -1:
-            for k in range(best_start, best_start + clean_duration): chosen_days.add(k)
-            recommended_windows.append({
-                'q': q_num, 
-                'start_idx': best_start, 
-                'end_idx': best_start + clean_duration - 1,
-                'start_date': dates[best_start], 
-                'end_date': dates[best_start + clean_duration - 1],
-                'avg_dust': best_avg_dust, 
-                'cost': total_cleaning_cost, 
-                'is_perfect': is_perfect,
-                'is_manual': False,
-                'alternative_window': alternative_window if not is_perfect else None
+            res.append({
+                "date": date, "rain": round(rain, 1), "wind": round(wind, 1),
+                "radiation_mj": round(rad_mj, 1),
+                "radiation_kwh": round(rad_mj / 3.6, 2),
+                "humidity": round(hum, 1), "temp": round(temp, 1),
+                "code": code, "icon": get_weather_icon(code), "desc": get_weather_desc(code, hum, wind)
             })
+        return res, "Open-Meteo API"
+    except Exception as e:
+        start = datetime.datetime.now()
+        sim = []
+        for i in range(days):
+            d = (start + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+            r = np.random.exponential(3) if np.random.random() < 0.6 else 0
+            w = max(0, np.random.normal(4, 2))
+            rad_mj = max(5, 20 * (1 - min(r/10, 0.8)) + np.random.normal(0, 2))
+            hum = min(99, max(40, np.random.normal(80, 10)))
+            code = 61 if r > 1 else (3 if hum > 85 else 0)
+            sim.append({
+                "date": d, "rain": round(r, 1), "wind": round(w, 1), 
+                "radiation_mj": round(rad_mj, 1), "radiation_kwh": round(rad_mj/3.6, 2),
+                "humidity": round(hum, 1), "temp": round(np.random.normal(30, 3), 1),
+                "code": code, "icon": get_weather_icon(code), "desc": get_weather_desc(code, hum, w)
+            })
+        return sim, "模拟模式 (API 备用)"
 
-    # --- 第三步：生成最终积灰序列 ---
-    final_dust_series = list(dust_series_natural)
-    recommended_windows.sort(key=lambda x: x['start_idx'])
-
-    for w in recommended_windows:
-        clean_end_day = w['end_idx']
-        next_day_idx = clean_end_day + 1
-        if next_day_idx < len(final_dust_series):
-            final_dust_series[next_day_idx] = 0.2 
-        
-        for k in range(next_day_idx + 1, len(final_dust_series)):
-            r = rain[k]
-            prev_dust = final_dust_series[k-1]
-            if r >= HEAVY_RAIN_THRESHOLD:
-                final_dust_series[k] = 0.0
-            elif r >= LIGHT_RAIN_THRESHOLD:
-                final_dust_series[k] = prev_dust * 0.5
-            else:
-                final_dust_series[k] = prev_dust + dust_rate
-            final_dust_series[k] = min(final_dust_series[k], MAX_DUST_CAPACITY)
-
-    # --- 第四步：生成每日报表 ---
-    daily_plans = []
+# ================= 🧠 决策引擎 =================
+def run_engine(weather, cfg, econ):
+    dates = [x['date'] for x in weather]
+    rains = [x['rain'] for x in weather]
+    winds = [x['wind'] for x in weather]
+    rads_mj = [x['radiation_mj'] for x in weather]
+    hums = [x['humidity'] for x in weather]
+    
+    panels = cfg['panels']
+    cap_mw = cfg['capacity']
+    robots = cfg['robots']
+    
+    p_sell, p_water, p_elec = econ['sell'], econ['water'], econ['elec']
+    
+    eff_robots = robots * ROBOT_AVAILABILITY_RATE
+    daily_cap = eff_robots * ROBOT_EFFICIENCY_PANELS_PER_HOUR * ROBOT_DAILY_WORK_HOURS
+    
+    if daily_cap <= 0:
+        duration = 999
+    else:
+        duration = math.ceil(panels / daily_cap)
+    
+    water_cost = panels * WATER_CONSUMPTION_PER_PANEL * p_water
+    elec_cost = panels * ENERGY_CONSUMPTION_PER_PANEL * p_elec
+    single_cost = water_cost + elec_cost
+    
+    dust = 0.0
+    plan, windows = [], []
+    last_end = -999
+    
     for i in range(len(dates)):
-        date_obj = date_objs[i]
-        weekday_cn = date_obj.strftime("%A")
-        wk_map = {"Monday":"周一", "Tuesday":"周二", "Wednesday":"周三", "Thursday":"周四", "Friday":"周五", "Saturday":"周六", "Sunday":"周日"}
+        r, w, rad_mj, hum = rains[i], winds[i], rads_mj[i], hums[i]
         
-        is_rec = i in chosen_days
-        q_info = next((w for w in recommended_windows if w['start_idx'] <= i <= w['end_idx']), None)
-        
-        daily_sun_hours = radiation[i] / 3.6
-        theoretical_revenue = capacity * daily_sun_hours * 1000 * p_sell
-        d_val = final_dust_series[i]
-        efficiency_loss_factor = min(d_val / 100.0, 1.0)
-        
-        if is_rec and q_info:
-            if q_info.get('is_manual'):
-                status = f"🔧 Q{q_info['q']} 手动执行 (夜)"
-                color = "blue"
-            else:
-                status = f"📅 Q{q_info['q']} 推荐 (夜)" if q_info['is_perfect'] else f"⚠️ Q{q_info['q']} 高风险 (夜)"
-                color = "green" if q_info['is_perfect'] else "red"
-            
-            action = "Night Cleaning"
-            actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor)
-            daily_cost = total_cleaning_cost if i == q_info['start_idx'] else 0
-            profit = actual_revenue - daily_cost
+        if r >= HEAVY_RAIN_THRESHOLD: dust = 0.0
+        elif r >= LIGHT_RAIN_THRESHOLD: dust *= 0.5
         else:
-            if d_val < 3.0:
-                status = "⚪ 积灰较少"
-                color = "gray"
-            elif 3.0 <= d_val < 7.0:
-                status = "⚠️ 中度积灰"
-                color = "orange"
-            else:
-                status = "🛑 重度积灰"
-                color = "red"
-            action = "Monitor"
-            actual_revenue = theoretical_revenue * (1 - efficiency_loss_factor)
-            daily_cost = 0
-            profit = actual_revenue
-
-        daily_plans.append({
-            "日期": dates[i], "星期": wk_map.get(weekday_cn, ""), "季度": (i // step) + 1,
-            "实测降雨 (mm)": round(rain[i], 1), 
-            "日辐射量 (MJ/m²)": round(radiation[i], 1),
-            "等效日照 (h)": round(daily_sun_hours, 1),
-            "动态积灰度 (%)": round(d_val, 1),
-            "操作建议": status, "状态颜色": color, "行动": action,
-            "当日净现金流 ($)": round(profit, 1), "month_num": date_obj.month,
-            "is_manual_clean": q_info.get('is_manual', False) if q_info else False
-        })
+            rate = DUST_ACCUMULATION_RATE_BASE
+            if hum > MUD_RISK_HUMIDITY and r < 0.1: rate *= 1.3
+            dust += rate
+        dust = min(dust, MAX_DUST_CAPACITY)
         
-    return pd.DataFrame(daily_plans), recommended_windows, HEAVY_RAIN_THRESHOLD
-
-if st.button("🔍 生成/更新季度固定清洗计划", type="primary"):
-    weather = get_real_historical_climate(LATITUDE, LONGITUDE)
-    if weather:
-        st.success(f"✅ **规划就绪**: 已加载实测辐射数据 (夜间清洗模式)。")
-        df_daily, rec_windows, RAIN_THRESHOLD = analyze_quarterly_plan(
-            weather, capacity_mw, sell_price, robot_elec_price, water_price, 
-            effective_dust_rate, robot_eff, days_to_clean_all, 
-            current_params['manual_dates']
-        )
-        st.session_state['df_daily'] = df_daily
-        st.session_state['rec_windows'] = rec_windows
-        st.session_state['data_loaded'] = True
-
-if 'data_loaded' in st.session_state and st.session_state['data_loaded']:
-    df_daily = st.session_state['df_daily']
-    rec_windows = st.session_state['rec_windows']
-    
-    st.subheader("📊 年度季度清洗计划概览")
-    cols = st.columns(4)
-    total_cost = 0
-    
-    if len(rec_windows) < 4:
-        st.warning(f"⚠️ 由于工期或日期范围限制，仅生成了 {len(rec_windows)} 个季度的计划。")
-    
-    for i, w in enumerate(rec_windows):
-        total_cost += w['cost']
-        if i < 4:
-            date_range = f"{w['start_date'][5:]} ~ {w['end_date'][5:]}"
-            detail = f"积灰:{w['avg_dust']:.1f}% | 成本:${w['cost']:,.0f}"
-            is_manual = w.get('is_manual', False)
+        loss = (dust / 100) * (1 + (1 - rad_mj/20) * (SOILING_NON_LINEAR_FACTOR - 1))
+        loss = min(loss, 1.0)
+        
+        gen_potential = cap_mw * (rad_mj / 3.6) * 1000
+        lost_rev = gen_potential * loss * p_sell
+        
+        is_cleaning = i <= last_end and i >= (last_end - duration + 1)
+        safety_stop = w > WIND_SAFETY_LIMIT
+        hot_spot = dust > HOTSPOT_THRESHOLD
+        
+        action, status, cost = "监控", "⚪ 正常运行", 0.0
+        trigger, reason = False, ""
+        
+        if not is_cleaning and not safety_stop:
+            if hot_spot:
+                trigger, reason = True, "热斑风险"
+            elif lost_rev * 3.0 > single_cost * 1.1:
+                trigger, reason = True, "经济最优"
+        
+        if trigger and (i + duration < len(dates)):
+            action, cost = "清洗", single_cost
+            last_end = i + duration - 1
+            status = f"🧹 清洗中 ({reason})"
+            windows.append({"start": i, "end": last_end, "reason": reason, "cost": single_cost})
+        
+        if i > 0 and (i-1) in [w['end'] for w in windows]:
+            dust, loss = 0.2, 0.002
+            status = "✨ 高效发电"
             
-            with cols[i]:
-                if is_manual:
-                    st.metric(f"🔧 Q{i+1} (手动)", date_range, help=detail)
-                    st.info(f"**已锁定执行 (夜)**\n{detail}", icon="🔒")
-                elif w['is_perfect']:
-                    st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
-                    st.success(f"**推荐窗口 (夜)**\n{detail}", icon="✅")
-                else:
-                    # 高风险窗口展示
-                    st.metric(f"🗓️ Q{i+1}", date_range, help=detail)
-                    st.error(f"**高风险窗口 (夜)**\n{detail}", icon="⚠️")
-                    
-                    # 🆕 显示备选窗口建议 (仅当备选与主计划不同时)
-                    alt = w.get('alternative_window')
-                    if alt:
-                        alt_date_range = f"{alt['start_date'][5:]} ~ {alt['end_date'][5:]}"
-                        st.markdown(f"""
-                        <div style="background-color: #fff8e1; padding: 10px; border-radius: 5px; margin-top: 5px; border-left: 4px solid #ff9800;">
-                        <small>💡 **建议备选窗口**: {alt_date_range}</small><br>
-                        <small style="color: #555;">{alt['reason']}</small>
-                        </div>
-                        """, unsafe_allow_html=True)
-    
-    net_profit = df_daily['当日净现金流 ($)'].sum()
-    st.info(f"**💰 年度预估总清洗成本**: ${total_cost:,.1f} | **年度预估净收益**: ${net_profit:,.1f}")
-    
-    st.markdown("<br>", unsafe_allow_html=True) 
-    st.divider()
-    
-    st.subheader("📅 季度固定清洗执行计划表")
-    
-    with st.container():
-        filter_options = ["显示所有日期", "仅显示 🌙 清洗期", "仅显示 ⚠️ 高风险清洗期"]
-        if 'filter_option' not in st.session_state:
-            st.session_state.filter_option = filter_options[0]
+        actual_gen = gen_potential * (1 - loss)
+        net = actual_gen * p_sell - cost
         
-        selected_filter = st.radio(
-            "🔍 视图过滤:", 
-            filter_options, 
-            horizontal=True,
-            key='filter_option',
-            label_visibility="collapsed"
-        )
-        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        plan.append({
+            "date": dates[i], "rain": r, "wind": w, 
+            "radiation_kwh": round(rad_mj / 3.6, 2),
+            "dust": round(dust, 2), "loss": round(loss*100, 1),
+            "action": action, "status": status,
+            "revenue": round(actual_gen * p_sell, 1), "cost": round(cost, 1),
+            "net": round(net, 1), "carbon": round((actual_gen * CARBON_FACTOR)/1000, 3),
+            "hot_spot": hot_spot, "safety": safety_stop
+        })
+        if action == "Cleaning" and i == last_end: dust = 0.2
+        
+    return pd.DataFrame(plan), windows, {
+        "total_cost": sum(w['cost'] for w in windows),
+        "count": len(windows), "duration": duration
+    }
 
-    display_df = df_daily.copy()
-    if selected_filter == "仅显示 🌙 清洗期":
-        display_df = display_df[display_df['行动'] == "Night Cleaning"]
-    elif selected_filter == "仅显示 ⚠️ 高风险清洗期":
-        display_df = display_df[(display_df['行动'] == "Night Cleaning") & (display_df['状态颜色'] == 'red')]
+# ================= 🪟 定义原生对话框 =================
+@st.dialog("📖 技术原理")
+def technical_principles_dialog():
+    st.markdown("""
+    本系统结合实时气象预报与非线性物理模型，优化巴西光伏电站的清洗调度。
     
-    def color_code(val):
-        if val is None: return ""
-        val_str = str(val)
-        if "手动" in val_str: return "color: white; font-weight: bold; background-color: #2563eb;" 
-        if "推荐" in val_str: return "color: white; font-weight: bold; background-color: #16a34a;"
-        if "高风险" in val_str: return "color: white; font-weight: bold; background-color: #dc2626;"
-        if "较少" in val_str: return "color: gray; background-color: #f3f4f6;"
-        if "中度" in val_str: return "color: white; font-weight: bold; background-color: #f97316;"
-        if "重度" in val_str: return "color: white; font-weight: bold; background-color: #dc2626;"
-        return ""
+    #### 1. 数据来源
+    - **天气:** [Open-Meteo API](https://open-meteo.com/) (全球预报模型)。
+    - **指标:** 短波辐射 (kWh/m²)、降水、风速、湿度。
     
-    def cash_flow_color(val):
-        if val is None: return ""
-        if val < 0: return "color: red; font-weight: bold;"
-        else: return "color: green; font-weight: bold;"
+    #### 2. 积灰累积模型
+    <div class="formula" style="background:#fbfbfd; border-left:4px solid #0071e3; padding:10px; margin:10px 0;">
+        Dust<sub>t+1</sub> = min(Dust<sub>t</sub> + Rate × Factor, Max<sub>cap</sub>)
+    </div>
+    - `Rate`: 0.4%/天 (基础)，若湿度 > 85% 则乘以 1.3 (泥泞风险)。
+    - **自然清洗:** 降雨 > 5mm 重置积灰；降雨 > 1mm 减少 50%。
+    
+    #### 3. 功率损耗模型
+    <div class="formula" style="background:#fbfbfd; border-left:4px solid #0071e3; padding:10px; margin:10px 0;">
+        Loss = (Dust / 100) × [1 + (1 - Rad/Rad<sub>std</sub>) × 1.2]
+    </div>
+    
+    #### 4. 经济决策逻辑
+    触发清洗条件：
+    1. **安全:** 积灰 > 8% (热斑风险) 且 风速 < 10 m/s。
+    2. **经济:** 损失收入 > 1.1 × 清洗成本。
+    
+    *注：水资源限制已禁用。机器人数量直接影响清洗窗口期长短。*
+    """, unsafe_allow_html=True)
 
-    columns_to_show = [
-        "日期", "星期", "季度", "实测降雨 (mm)", "日辐射量 (MJ/m²)", 
-        "等效日照 (h)", "动态积灰度 (%)", "操作建议", "当日净现金流 ($)"
-    ]
+# ================= 🖥️ 界面布局 =================
+
+with st.sidebar:
+    st.image("https://img.icons8.com/fluency/96/solar-panel.png", width=50)
+    st.title("系统配置")
+    st.markdown("---")
     
-    st.dataframe(
-        display_df[columns_to_show].style.applymap(color_code, subset=['操作建议'])
-        .applymap(cash_flow_color, subset=['当日净现金流 ($)'])
-        .format({
-            "当日净现金流 ($)": "${:,.1f}", 
-            "动态积灰度 (%)": "{:.1f}%",
-            "日辐射量 (MJ/m²)": "{:.1f}",
-            "等效日照 (h)": "{:.1f}",
-            "实测降雨 (mm)": "{:.1f}"
-        }), 
-        use_container_width=True, 
-        hide_index=True, 
-        height=400
-    )
+    station = st.selectbox("电站选择", list(STATION_DB.keys()), index=0)
     
-    csv = display_df[columns_to_show].to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 下载季度计划 CSV", data=csv, file_name='quarterly_plan_night.csv', mime='text/csv')
+    if station != "请选择电站...":
+        db = STATION_DB[station]
+        
+        st.markdown("## 规模参数")
+        c1, c2 = st.columns(2)
+        with c1: 
+            p_count = st.number_input("光伏板数量", value=40000, step=100, label_visibility="collapsed")
+            st.caption("电站光伏板总数。决定总清洗工作量。")
+        with c2: 
+            p_power = st.number_input("单板功率 (Wp)", value=700, step=10, label_visibility="collapsed")
+            st.caption("每块板的峰值功率 (瓦特)。用于计算总装机容量。")
+        
+        valid, err, cap_mw = validate_inputs(p_count, p_power)
+        if not valid:
+            st.error(err)
+            st.stop()
+        
+        st.info(f"**光伏总负载：{cap_mw:.2f} MW**", icon="🔋")
+        
+        st.markdown("## 清洗资源")
+        robots = st.number_input("清洗机器人数量 (台)", value=28, step=1, label_visibility="collapsed")
+        st.caption("可用清洗机器人数量。机器人越多 = 清洗周期越短 = 调度越灵活。")
+        
+        target_days = 7
+        daily_need = p_count / target_days
+        robot_capacity_per_day = ROBOT_EFFICIENCY_PANELS_PER_HOUR * ROBOT_DAILY_WORK_HOURS * ROBOT_AVAILABILITY_RATE
+        rec_robots = math.ceil(daily_need / robot_capacity_per_day) if robot_capacity_per_day > 0 else 999
+        
+        current_days = math.ceil(p_count / (robots * robot_capacity_per_day)) if (robots * robot_capacity_per_day) > 0 else 999
+        
+        if robots < rec_robots:
+            st.warning(f"⚠️ 数量不足：建议 **{rec_robots} 台** 以实现 {target_days} 天清洗周期。")
+            st.caption(f"影响：当前配置需 **{current_days} 天** 完成清洗。周期过长可能错过最佳天气窗口。")
+        elif robots > rec_robots:
+            st.success(f"✅ 配置优良：超过推荐值 ({rec_robots} 台)。")
+            st.caption(f"影响：清洗迅速 (约 **{current_days} 天**)。允许频繁维护，更好地管理风险。")
+        else:
+            st.info(f"✅ 推荐数量 ({rec_robots} 台)。周期：约 {current_days} 天。")
+        
+        st.markdown("## 经济参数 (巴西雷亚尔)")
+        p_sell = st.number_input("售电电价 (R$/kWh)", value=float(db['sell_price']), format="%.3f", label_visibility="collapsed")
+        st.caption("每千瓦时电力出售给电网的收入。")
+        
+        p_elec = st.number_input("机器人耗电成本 (R$/kWh)", value=float(db['robot_elec_price']), format="%.3f", label_visibility="collapsed")
+        st.caption("清洗机器人运行时的电力消耗成本。")
+        
+        p_water = st.number_input("工业用水成本 (R$/吨)", value=float(db['water_price']), format="%.2f", label_visibility="collapsed")
+        st.caption("清洗所用的工业水成本（如适用）。")
+        
+        st.markdown("---")
+        st.button("📖 技术原理", use_container_width=True, on_click=technical_principles_dialog)
+        
+        LAT, LON = float(db['lat']), float(db['lon'])
+        run = True
+    else:
+        run = False
+
+if run:
+    weather_data, source = fetch_weather(LAT, LON)
+    cfg = {"panels": p_count, "capacity": cap_mw, "robots": robots}
+    econ = {"sell": p_sell, "water": p_water, "elec": p_elec}
     
-    st.divider()
+    df, wins, stats = run_engine(weather_data, cfg, econ)
     
-    st.subheader("📈 全年辐射、积灰趋势与发电收益")
+    st.title(f"🇧 {station}")
+    st.caption(f"数据来源：{source} | 更新时间：{datetime.datetime.now().strftime('%H:%M')}")
+    st.markdown("---")
     
+    c0, c1, c2, c3, c4 = st.columns(5)
+    rev = df['revenue'].sum()
+    cost = stats['total_cost']
+    profit = rev - cost
+    carbon = df['carbon'].sum()
+    
+    with c0:
+        st.markdown(f"""
+        <div class="metric-container fade-in-up">
+            <div class="metric-label">光伏总负载</div>
+            <div class="metric-value">{cap_mw:.2f} MW</div>
+            <div class="metric-sub neutral">装机容量</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c1:
+        st.markdown(f"""
+        <div class="metric-container fade-in-up" style="animation-delay: 0.1s">
+            <div class="metric-label">总收入</div>
+            <div class="metric-value">R$ {rev:,.0f}</div>
+            <div class="metric-sub neutral">14 天预测</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div class="metric-container fade-in-up" style="animation-delay: 0.2s">
+            <div class="metric-label">清洗成本</div>
+            <div class="metric-value">R$ {cost:,.0f}</div>
+            <div class="metric-sub neutral">{stats['count']} 个周期</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        margin = (profit/max(rev,1))*100
+        color = "#34c759" if margin > 0 else "#ff3b30"
+        st.markdown(f"""
+        <div class="metric-container fade-in-up" style="animation-delay: 0.3s">
+            <div class="metric-label">净利润</div>
+            <div class="metric-value">R$ {profit:,.0f}</div>
+            <div class="metric-sub" style="color:{color}">{margin:.1f}% 利润率</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""
+        <div class="metric-container fade-in-up" style="animation-delay: 0.4s">
+            <div class="metric-label">碳减排</div>
+            <div class="metric-value">{carbon:,.2f} 吨</div>
+            <div class="metric-sub neutral">CO₂e 当量</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    st.subheader("天气预报与风险")
+    rows = (len(weather_data) + 6) // 7
+    for r in range(rows):
+        cols = st.columns(7)
+        for c in range(7):
+            idx = r * 7 + c
+            if idx < len(weather_data):
+                d = weather_data[idx]
+                badge = ""
+                if d['wind'] > WIND_SAFETY_LIMIT: badge = "<div class='risk-badge risk-wind'>大风</div>"
+                elif d['humidity'] > MUD_RISK_HUMIDITY and d['code'] in [2,3]: badge = "<div class='risk-badge risk-mud'>泥泞</div>"
+                
+                with cols[c]:
+                    st.markdown(f"""
+                    <div class="weather-card fade-in-up" style="animation-delay: {idx*0.05}s">
+                        <div class="w-date">{fmt_date_short(d['date'])}</div>
+                        <div class="w-icon">{d['icon']}</div>
+                        <div class="w-temp">{d['temp']}°C</div>
+                        <div class="w-desc">{d['desc'].split('(')[0]}</div>
+                        <div class="w-stats">🌧️ {d['rain']}mm | ☢️ {d['radiation_kwh']} kWh</div>
+                        {badge}
+                    </div>
+                    """, unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 📈 图表：三轴分离 (最终稳定版 - 不使用 position)
+    st.subheader("策略可视化")
     fig = go.Figure()
     
+    # 1. 辐射量 (左轴 y1)
     fig.add_trace(go.Scatter(
-        x=df_daily['日期'], 
-        y=df_daily['日辐射量 (MJ/m²)'],
-        mode='lines', 
-        name='日辐射量 (MJ/m²)',
-        line=dict(color='orange', width=1, dash='dot'),
-        opacity=0.6,
+        x=df['date'], y=df['radiation_kwh'], 
+        name='辐射量 (kWh/m²)', 
+        line=dict(color='#ff9500', width=3),
         yaxis='y1'
     ))
-
-    fig.add_trace(go.Bar(
-        x=df_daily['日期'], 
-        y=df_daily['当日净现金流 ($)'],
-        name='当日净现金流 ($)',
-        marker_color=df_daily['当日净现金流 ($)'].apply(lambda x: 'green' if x > 0 else 'red'),
-        opacity=0.8,
-        yaxis='y2' 
-    ))
-
+    
+    # 2. 积灰度 (右轴 y2 - 内侧)
     fig.add_trace(go.Scatter(
-        x=df_daily['日期'], y=df_daily['动态积灰度 (%)'],
-        mode='lines', name='动态积灰度 (%)',
-        line=dict(color='purple', width=3),
-        yaxis='y1' 
+        x=df['date'], y=df['dust'], 
+        name='积灰度 (%)', 
+        line=dict(color='#ff3b30', width=3),
+        yaxis='y2'
     ))
     
-    for w in rec_windows:
-        # 主计划窗口
-        if w.get('is_manual'):
-            color = 'blue'
-            label = f"Q{w['q']} 手动 (夜)"
-            line_width = 2
-        elif w['is_perfect']:
-            color = 'green'
-            label = f"Q{w['q']} 推荐 (夜)"
-            line_width = 2
-        else:
-            color = 'red'
-            label = f"Q{w['q']} 高风险 (夜)"
-            line_width = 2
-            
-        fig.add_vrect(
-            x0=w['start_date'], 
-            x1=w['end_date'],
-            fillcolor=color, 
-            opacity=0.15,
-            line_width=line_width,
-            line_color=color,
-            annotation_text=label,
-            annotation_position="top right"
-        )
-        
-        # 🆕 绘制备选窗口 (橙色虚线框)
-        alt = w.get('alternative_window')
-        if alt:
-            fig.add_vrect(
-                x0=alt['start_date'],
-                x1=alt['end_date'],
-                fillcolor="orange",
-                opacity=0.05,
-                line_width=2,
-                line_dash="dash",
-                line_color="orange",
-                annotation_text=f"Q{w['q']} 备选 (高积灰)",
-                annotation_position="bottom left",
-                annotation_font_size=10,
-                annotation_font_color="orange"
-            )
+    # 3. 净现金流 (右轴 y3 - 外侧)
+    fig.add_trace(go.Bar(
+        x=df['date'], y=df['net'], 
+        name='净现金流 (R$)', 
+        marker_color=df['net'].apply(lambda x: '#34c759' if x>0 else '#ff3b30'), 
+        opacity=0.4,
+        yaxis='y3'
+    ))
     
+    # 添加清洗窗口背景
+    for w in wins:
+        fig.add_vrect(x0=df['date'].iloc[w['start']], x1=df['date'].iloc[w['end']], fillcolor="#0071e3", opacity=0.1, line_width=0)
+    
+    # 🔧 关键修复：通过 domain 和 margin 分离坐标轴
     fig.update_layout(
-        height=600, 
-        margin=dict(l=0, r=0, t=30, b=0),
+        height=550,
         hovermode='x unified',
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
-        xaxis=dict(tickformat="%m-%d", tickangle=45, nticks=36),
-        yaxis=dict(
-            title="积灰度 (%) / 辐射 (MJ/m²)", 
-            title_font=dict(color="purple", size=14),
-            tickfont=dict(color="purple"),
-            side='left'
-        ),
-        yaxis2=dict(
-            title="当日净现金流 ($)", 
-            title_font=dict(color="green", size=14),
-            tickfont=dict(color="green"), 
-            overlaying='y', 
-            side='right'
-        ),
-        modebar_add=['v1hovermode', 'toggleSpikeLines'],
-        modebar_remove=['toImage', 'pan2d', 'select2d', 'lasso2d', 'autoScale2d', 'resetScale2d', 'zoomIn2d', 'zoomOut2d', 'orbitRotation', 'tableRotation']
-    )
+        legend=dict(orientation="h", y=1.02, x=0.5, xanchor='center', font=dict(size=11)),
         
+        # 左轴 (辐射)
+        yaxis=dict(
+            title="辐射量 (kWh/m²)", 
+            side='left', 
+            gridcolor='#f0f0f0', 
+            range=[0, 8], 
+            tickfont=dict(color="#ff9500", size=11),
+            title_standoff=10
+        ),
+        
+        # 右轴 1 (积灰 - 内侧)
+        yaxis2=dict(
+            title="积灰度 (%)", 
+            overlaying='y', 
+            side='right', 
+            showgrid=False, 
+            range=[0, 15], 
+            tickfont=dict(color="#ff3b30", size=11),
+            anchor='free',
+            domain=[0, 1],
+            # 不再使用 position，让 Plotly 自动放置在右侧边缘
+        ),
+        
+        # 右轴 2 (现金流 - 外侧)
+        yaxis3=dict(
+            title="净现金流 (R$)", 
+            overlaying='y', 
+            side='right', 
+            showgrid=False, 
+            tickfont=dict(color="#34c759", size=11),
+            anchor='free',
+            domain=[0, 1],
+            # 不再使用 position
+        ),
+        
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        # 大幅增加右侧边距，为两个轴留出空间
+        margin=dict(l=60, r=120, t=60, b=40), 
+        font=dict(family="Noto Sans SC", size=11),
+        barmode='overlay'
+    )
+
     st.plotly_chart(fig, use_container_width=True)
     
-    st.markdown("---")
-    st.subheader("📚 数据来源与计算逻辑说明")
+    # 表格
+    st.subheader("执行计划")
+    mode = st.radio("筛选", ["全部", "仅清洗", "仅风险"], horizontal=True)
+    view = df.copy()
+    view['Date'] = view['date'].apply(fmt_date_full)
     
-    with st.expander("点击查看详细数据来源与公式", expanded=False):
-        st.markdown("""
-        #### 1. 气象数据来源
-        - **数据提供商**: [Open-Meteo Historical Archive API](https://open-meteo.com/)
-        - **获取内容**: 过去 365 天的实测逐日数据（辐射量、降雨量、风速）。
-        
-        #### 2. 夜间清洗逻辑
-        - **发电无损**: 清洗工作安排在日落后进行，**不占用白天发电时间**。
-        - **积灰重置**: 清洗结束后的**次日清晨**，积灰度立即重置为接近 0%。
-        - **收益计算**: 清洗期间的发电量仅受**当日积灰程度**影响，**不施加额外的工期折损系数**。
-        
-        #### 3. 积灰模型
-        - **无雨时**: 积灰度每日增加 `日均积灰速率`
-        - **小雨 (1.0mm-5.0mm)**: 积灰度减半
-        - **大雨 (≥5.0mm)**: 积灰度清零
-        - **最大积灰容量**: 15.0%
-        
-        #### 4. 计算公式
-        - **等效日照 (h)** = 日辐射量 (MJ/m²) / 3.6
-        - **发电量 (kWh)** = 装机容量 (MW) × 等效日照 (h) × 1000
-        - **发电收益 (元)** = 发电量 (kWh) × 电价 (元/kWh)
-        - **发电损失率** = 积灰度 (%) / 100.0
-        - **当日净现金流** = (发电收益 × (1 - 发电损失率)) - 清洗成本
-
-        #### 5. ⚠️ 高风险清洗期与备选方案
-        - **高风险定义**: 在季度内无法找到连续 N 天（N=工期）完全无大雨（≥5.0mm）的时段。
-        - **主计划策略 (保守)**: 选择**降雨总量最少**的窗口，以最大化清洗效果保留率。
-        - **备选方案策略 (激进)**: 选择**积灰度最高**的窗口。
-          - *适用场景*: 当积灰导致的发电损失预期 > 降雨导致的清洗效果折损时。
-          - *显示逻辑*: 仅当备选窗口与主计划窗口**日期不同**时显示，避免重复建议。
-        """)
+    if mode == "仅清洗": view = view[view['action'] == '清洗']
+    elif mode == "仅风险": view = view[(view['hot_spot']) | (view['safety'])]
     
-    st.caption("光伏电站季度固定清洗计划系统 v1.0")
-    st.caption("数据来源: Open-Meteo Historical Archive API")
-    st.caption("计算公式: 详见 '数据来源与计算逻辑说明' 部分")
-    st.caption("系统开发: Jerrick_China_NP PSO")
+    cols_disp = ["Date", "radiation_kwh", "dust", "loss", "action", "status", "net"]
+    rename_map = {"radiation_kwh": "辐射 (kWh)", "dust": "积灰%", "loss": "损耗%", "action": "动作", "status": "状态", "net": "净收益 (R$)"}
+    
+    def style_status(val):
+        if "风险" in str(val): return "color:white; background-color:#ff3b30;"
+        if "清洗" in str(val): return "color:white; background-color:#0071e3;"
+        if "高效" in str(val): return "color:#34c759; font-weight:bold;"
+        return ""
+    
+    st.dataframe(
+        view[cols_disp].rename(columns=rename_map).style.map(style_status, subset=['状态'])
+        .format({"辐射 (kWh)":"{:.2f}", "积灰%":"{:.1f}%", "损耗%":"{:.1f}%", "净收益 (R$)":"R$ {:,.0f}"}),
+        use_container_width=True, height=300
+    )
 
-elif 'data_loaded' not in st.session_state:
-    if config_valid:
-        st.info("👈 请点击左上角的 **“生成/更新季度固定清洗计划”** 按钮开始分析.")
+else:
+    st.markdown("""
+    <div style="text-align:center; padding: 100px; color: #86868b;">
+        <h2>请选择电站开始分析</h2>
+        <p>系统将自动计算最优清洗策略。</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-# ================= 底部引用信息 =================
 st.markdown("---")
-st.caption("光伏电站季度固定清洗计划与智能优选系统 v1.0")
-st.caption("数据来源: Open-Meteo Historical Archive API (https://open-meteo.com/)")
-st.caption("计算公式: ")
-st.caption("- 等效日照 = 日辐射量 (MJ/m²) / 3.6")
-st.caption("- 积灰度累积: 无雨时 + 日均积灰速率, 小雨时 × 0.5, 大雨时 = 0")
-st.caption("- 当日净现金流 = (装机容量 × 等效日照 × 1000 × 电价) × (1 - 积灰度/100) - 清洗成本")
-st.caption("© 2026 Jerrick_China_NP PSO | 保留所有权利")
+st.caption("© 2026 巴西光伏智能运维 | Designed by Jerrick Tan_N184")
